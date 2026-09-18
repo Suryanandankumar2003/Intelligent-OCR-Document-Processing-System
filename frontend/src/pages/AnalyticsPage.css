@@ -1,0 +1,76 @@
+.analytics-page {
+  width: 100%;
+  max-width: 1080px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.analytics-page--refreshing {
+  /* Refetch keeps the frame: the previous render dims slightly instead
+     of being cleared/replaced by a skeleton, per the dataviz skill's
+     interaction guidance. */
+  opacity: 0.7;
+  transition: opacity 0.15s ease;
+}
+
+.analytics-page__loading {
+  color: var(--color-text-muted);
+}
+
+.analytics-page__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.analytics-page__generated-at {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 0.8rem;
+}
+
+.analytics-page__refresh {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-4);
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.analytics-page__refresh:hover:not(:disabled) {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+.analytics-page__refresh:disabled {
+  cursor: not-allowed;
+  color: var(--color-text-muted);
+}
+
+.analytics-page__cards {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-4);
+}
+
+@media (min-width: 860px) {
+  .analytics-page__cards {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+.analytics-page__charts {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--space-4);
+}
+
+@media (min-width: 860px) {
+  .analytics-page__charts {
+    grid-template-columns: 1fr 1.3fr;
+    align-items: start;
+  }
+}

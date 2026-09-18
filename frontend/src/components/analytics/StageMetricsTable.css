@@ -1,0 +1,61 @@
+.stage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.stage-table th,
+.stage-table td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+}
+
+.stage-table thead th {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.stage-table tbody th {
+  font-weight: 600;
+}
+
+.stage-table__num {
+  /* A column of numbers that must align vertically — the one case that
+     gets tabular-nums, per the dataviz skill's figures guidance. */
+  font-variant-numeric: tabular-nums;
+}
+
+.stage-table__no-data {
+  color: var(--color-text-muted);
+  font-style: italic;
+  font-variant-numeric: normal;
+}
+
+.stage-table__rate {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.stage-table__rate-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.stage-table__rate--good .stage-table__rate-dot {
+  background: #0ca30c;
+}
+
+.stage-table__rate--warning .stage-table__rate-dot {
+  background: #fab219;
+}
+
+.stage-table__rate--critical .stage-table__rate-dot {
+  background: #d03b3b;
+}

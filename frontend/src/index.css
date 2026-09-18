@@ -1,0 +1,90 @@
+/**
+ * Global design tokens (CSS custom properties) and a minimal reset.
+ *
+ * Every component's own .css file references these variables (var(--...))
+ * instead of hardcoding colors/spacing — so the entire app's look can be
+ * retuned from this one file, and every component automatically stays
+ * visually consistent with every other one.
+ */
+:root {
+  --color-bg: #f8fafc;
+  --color-surface: #ffffff;
+  --color-border: #e2e8f0;
+  --color-text: #0f172a;
+  --color-text-muted: #64748b;
+
+  --color-primary: #2563eb;
+  --color-primary-hover: #1d4ed8;
+  --color-primary-contrast: #ffffff;
+
+  --color-success: #16a34a;
+  --color-success-bg: #dcfce7;
+  --color-error: #dc2626;
+  --color-error-bg: #fee2e2;
+
+  /* Categorical chart palette (analytics dashboard). Fixed order, never
+     cycled or reassigned per-view — one document type always maps to
+     the same hue everywhere it's charted. Values are the dataviz
+     skill's validated default categorical slots 1-4 (blue/orange/
+     aqua/yellow): passes CVD-safe adjacent-pair separation and the
+     normal-vision floor as this exact 4-color sequence (see
+     `node scripts/validate_palette.js` in the dataviz skill). Unknown
+     isn't part of that validated set — it's "not yet classified" rather
+     than a peer category, so it gets the app's existing muted tone
+     instead of a 5th vivid hue. */
+  --chart-pan: #2a78d6;
+  --chart-aadhaar: #eb6834;
+  --chart-invoice: #1baf7a;
+  --chart-prescription: #eda100;
+  --chart-unknown: var(--color-text-muted);
+
+  /* Chart chrome shared by every chart on the analytics dashboard. */
+  --chart-grid: #e1e0d9;
+  --chart-axis: #c3c2b7;
+
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08);
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* System font stacks, not a webfont: no external request, no
+     flash-of-unstyled-text, and it already looks native on every OS. */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+
+  color-scheme: light;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+button {
+  font-family: inherit;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-sans);
+  color: var(--color-text);
+}
