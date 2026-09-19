@@ -33,7 +33,7 @@ import logging
 import re
 from typing import List, Optional, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 logger = logging.getLogger(__name__)
 
@@ -202,8 +202,106 @@ class PrescriptionFields(BaseModel):
         return normalized
 
 
-# A single alias for "one of the four extraction result shapes", used as
+_TRF_DATETIME_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+
+class TestReportFormFields(BaseModel):
+    """Fields extracted from a laboratory Test Report Form (TRF).
+
+    Field names intentionally match the exact keys given in the TRF
+    extraction spec (`services/prompts/extraction_prompt.py`'s
+    `_TEST_REPORT_FORM_PROMPT`) rather than this file's usual snake_case
+    convention — this document type's output is meant to line up with an
+    existing downstream contract, not with the other three schemas here.
+    `Patient Name` is the one key that isn't a valid Python identifier,
+    so it's modeled as `Patient_Name` with that exact string as its
+    alias; `populate_by_name=True` lets it be constructed either way, and
+    every `model_dump(by_alias=True)` call elsewhere in the app is what
+    actually puts the space back on the wire and in storage.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    Client_Code: Optional[str] = Field(default=None, description="Client code, from just above Client_Name")
+    Client_Name: Optional[str] = Field(default=None, description="Client name printed at the top of the form")
+    Patient_Name: Optional[str] = Field(default=None, alias="Patient Name", description="Patient's full name")
+    AGE: Optional[str] = Field(default=None, description="Patient's age, digits only")
+    Sex: Optional[str] = Field(default=None, description="Male/Female/whichever third option the form offers")
+    Contact_Number: Optional[str] = Field(default=None, description="Patient's (not the doctor's) contact number")
+    DOCTOR_NAME: Optional[str] = Field(default=None, description="Referring doctor's name, or 'Self'")
+    TRF_Number: Optional[str] = Field(default=None, description="Digits-only TRF number from the barcode")
+    TestName: Optional[str] = Field(default=None, description="Comma-separated list of ordered test names")
+    TestCode: Optional[str] = Field(default=None, description="Comma-separated list of ordered test codes")
+    SampleCollectionDateTime: Optional[str] = Field(
+        default=None, description="Sample collection date/time, as YYYY-MM-DD HH:MM:SS"
+    )
+    SAMPLE_TYPE: Optional[str] = Field(default=None, description="Comma-separated Specimen Type selections")
+
+    @field_validator(
+        "Client_Code",
+        "Client_Name",
+        "Patient_Name",
+        "AGE",
+        "Sex",
+        "Contact_Number",
+        "DOCTOR_NAME",
+        "TRF_Number",
+        "TestName",
+        "TestCode",
+        "SampleCollectionDateTime",
+        "SAMPLE_TYPE",
+        mode="before",
+    )
+    @classmethod
+    def _blank_to_none(cls, value: object) -> Optional[str]:
+        # The TRF prompt asks Gemini for "" (not null) on a missing
+        # field, unlike the other three schemas' JSON-schema-enforced
+        # null — folding it to None here still keeps "missing" a single
+        # concept for every consumer downstream of this model.
+        return _normalize_optional_text(value)
+
+    @field_validator("Client_Code")
+    @classmethod
+    def _clean_client_code(cls, value: Optional[str]) -> Optional[str]:
+        """Drop mid-code dots and a leading '-', per the extraction spec's own examples."""
+        if value is None:
+            return None
+        cleaned = value.replace(".", "").lstrip("-").strip()
+        return cleaned or None
+
+    @field_validator("TRF_Number")
+    @classmethod
+    def _clean_trf_number(cls, value: Optional[str]) -> Optional[str]:
+        """Digits only — the barcode number never legitimately contains punctuation."""
+        if value is None:
+            return None
+        cleaned = re.sub(r"[^0-9]", "", value)
+        return cleaned or None
+
+    @field_validator("AGE")
+    @classmethod
+    def _digits_only(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        digits = re.sub(r"\D", "", value)
+        return digits or None
+
+    @field_validator("SampleCollectionDateTime")
+    @classmethod
+    def _validate_datetime_format(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        if not _TRF_DATETIME_PATTERN.match(value):
+            logger.warning(
+                "Extracted SampleCollectionDateTime %r does not match YYYY-MM-DD HH:MM:SS; treating as missing",
+                value,
+            )
+            return None
+        return value
+
+
+# A single alias for "one of the five extraction result shapes", used as
 # the extraction service's return type and the API route's response
 # model so FastAPI can validate/document it as a proper `oneOf` schema
 # instead of an untyped dict.
-ExtractedFields = Union[PANCardFields, AadhaarCardFields, InvoiceFields, PrescriptionFields]
+ExtractedFields = Union[PANCardFields, AadhaarCardFields, InvoiceFields, PrescriptionFields, TestReportFormFields]

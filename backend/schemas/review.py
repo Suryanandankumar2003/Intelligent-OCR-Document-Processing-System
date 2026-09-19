@@ -12,29 +12,15 @@ working for all four document types, and for a fifth added later,
 without a `Union` of four request bodies that a client would have to
 pick between.
 """
-from datetime import datetime, timezone
+from datetime import datetime
+from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from core.document_types import DocumentType
 from core.review_status import ReviewStatus
-
-
-def _as_utc(value: Optional[datetime]) -> Optional[datetime]:
-    """Label a timestamp read back from the database as UTC.
-
-    SQLite has no timezone-aware type, so a `datetime` stored as UTC
-    (and `CURRENT_TIMESTAMP`, which is UTC) comes back naive, and
-    serializes to an ISO string with no offset — which any client that
-    parses it, including `new Date(...)` in a browser, reads as *local*
-    time. That silently shifts every "corrected at" on the review screen
-    by the viewer's UTC offset. Stamping the known timezone back on at
-    the API boundary is what makes the value unambiguous on the wire.
-    """
-    if value is None or value.tzinfo is not None:
-        return value
-    return value.replace(tzinfo=timezone.utc)
+from schemas.timestamps import as_utc
 
 
 class DocumentReviewUpdate(BaseModel):
@@ -70,6 +56,42 @@ class DocumentReviewUpdate(BaseModel):
         return value
 
 
+class ReviewDecision(str, Enum):
+    """
+    The verdict a reviewer can record on a document, as the client sends it.
+
+    Intentionally its own two-value enum rather than reusing
+    `ReviewStatus` directly in the request body. `ReviewStatus` includes
+    `PENDING_REVIEW`, which is the state a document starts in, not a
+    decision anyone can make — accepting it here would mean an endpoint
+    called "decision" that can un-review a document as a side effect of
+    a client typo. The mapping to the stored status lives in the route.
+    """
+
+    APPROVE = "approve"
+    REJECT = "reject"
+
+
+class DocumentReviewDecision(BaseModel):
+    """
+    Request body for `POST /documents/{filename}/review/decision`.
+
+    The other half of the workflow `DocumentReviewUpdate` above
+    deliberately refuses: that schema rejects an empty `corrected_fields`
+    because "marking a document reviewed with nothing to change is a real
+    workflow action, but it's a different one". This is that other
+    action, given its own endpoint and its own body rather than being
+    smuggled in as an empty PATCH — so the two are distinguishable in
+    logs, in the OpenAPI schema, and to any client reading either one.
+    """
+
+    decision: ReviewDecision = Field(
+        ...,
+        description="approve: the field set is signed off as correct. reject: the extraction is unusable.",
+        examples=["approve"],
+    )
+
+
 class FieldCorrectionRecord(BaseModel):
     """One audit-trail entry — a `database.models.FieldCorrection` row as returned to the client."""
 
@@ -86,7 +108,7 @@ class FieldCorrectionRecord(BaseModel):
     @field_validator("corrected_at")
     @classmethod
     def _stamp_utc(cls, value: datetime) -> datetime:
-        return _as_utc(value)
+        return as_utc(value)
 
 
 class DocumentReviewResponse(BaseModel):
@@ -108,6 +130,10 @@ class DocumentReviewResponse(BaseModel):
     reviewed_data: dict[str, Any] = Field(
         ..., description="Current values: original_data with every saved correction applied"
     )
+    ocr_text: Optional[str] = Field(
+        default=None,
+        description="Stored OCR transcript for this document; null if OCR predates transcript storage",
+    )
     review_status: ReviewStatus = Field(..., description="Pending Review until a reviewer has saved at least once")
     reviewed_at: Optional[datetime] = Field(
         default=None, description="When the document was last reviewed (UTC)"
@@ -119,4 +145,4 @@ class DocumentReviewResponse(BaseModel):
     @field_validator("reviewed_at")
     @classmethod
     def _stamp_utc(cls, value: Optional[datetime]) -> Optional[datetime]:
-        return _as_utc(value)
+        return as_utc(value)

@@ -63,6 +63,21 @@ _FIELD_LABELS = {
     "doctor_name": "Doctor Name",
     "date": "Date",
     "medicines": "Medicines",
+    "Client_Code": "Client Code",
+    "Client_Name": "Client Name",
+    # Disambiguated from Prescription's "patient_name" -> "Patient Name"
+    # above: without this, the export sheet would carry two columns
+    # both headed "Patient Name" with no way to tell them apart.
+    "Patient Name": "Patient Name (TRF)",
+    "AGE": "Age",
+    "Sex": "Sex",
+    "Contact_Number": "Contact Number",
+    "DOCTOR_NAME": "Referring Doctor",
+    "TRF_Number": "TRF Number",
+    "TestName": "Test Name",
+    "TestCode": "Test Code",
+    "SampleCollectionDateTime": "Sample Collection Date/Time",
+    "SAMPLE_TYPE": "Sample Type",
 }
 
 FIXED_COLUMNS = ("Filename", "Document Type", "Created Date")
@@ -94,8 +109,14 @@ def _extracted_field_names() -> list[str]:
         model_cls = EXTRACTION_MODEL_BY_TYPE.get(document_type)
         if model_cls is None:
             continue  # DocumentType.UNKNOWN has no field schema.
-        for field_name in model_cls.model_fields:
-            seen.setdefault(field_name, None)
+        for field_name, field_info in model_cls.model_fields.items():
+            # A field's alias (e.g. TestReportFormFields.Patient_Name ->
+            # "Patient Name") is the key actually stored in
+            # extracted_data/reviewed_data (see review_service.py and
+            # api/routes/extraction.py, both of which dump by_alias=True),
+            # so the column list has to walk by that same key or it would
+            # look up a key that's never actually present in the row dict.
+            seen.setdefault(field_info.alias or field_name, None)
     return list(seen)
 
 
@@ -116,6 +137,53 @@ def _format_cell(value: Any) -> Any:
     if value is None:
         return ""
     return value
+
+
+def _search_text_for(document: Document) -> str:
+    """
+    Everything about a document free-text search should match, lowercased:
+    its stored filename plus every non-empty current-best field value.
+
+    A deliberate mirror of `frontend/src/utils/documentRecords.js`'s
+    `searchTextFor` — same "reviewed or extracted" source, same `"; "`
+    join for a list value, same values-only rule (field *keys* are
+    excluded, so searching "name" doesn't match every document that
+    merely has a name field). The export has to agree with it exactly,
+    because "export what I'm looking at" is only true if both sides
+    decide "matches" the same way.
+    """
+    data = document.reviewed_data or document.extracted_data or {}
+    values = (str(_format_cell(value)) for value in data.values())
+    return " ".join([document.filename, *(value for value in values if value.strip())]).lower()
+
+
+def iter_matching_search(documents: Iterable[Document], search: Optional[str]) -> Iterator[Document]:
+    """
+    Narrow a document stream to those matching `search`, or pass it
+    through untouched when `search` is empty.
+
+    Applied in Python rather than pushed down into the query, unlike
+    every other export filter (`database.crud.iter_documents_for_export`).
+    The values being searched live inside a JSON column, and the only
+    thing SQL could cheaply do with that column is a `LIKE` over its
+    serialized text — which would match field *keys* and JSON punctuation
+    as readily as values, giving the export a different notion of
+    "matches" than the list screen that triggered it. Scanning in Python
+    costs a comparison per row on a scan the export is already doing, and
+    keeps the two definitions identical.
+
+    Streaming, not a list comprehension: the whole point of the iterator
+    this wraps is that no more than one batch of rows is ever resident,
+    and materializing the filtered result here would throw that away.
+    """
+    if not search or not search.strip():
+        yield from documents
+        return
+
+    needle = search.strip().lower()
+    for document in documents:
+        if needle in _search_text_for(document):
+            yield document
 
 
 def _as_naive_datetime(value: Optional[datetime]) -> Optional[datetime]:

@@ -108,12 +108,141 @@ PRESCRIPTION_SCHEMA = {
     "additionalProperties": False,
 }
 
+# Test Report Form fields are deliberately plain `{"type": "string"}`,
+# not the nullable anyOf shape every other schema above uses: the TRF
+# extraction prompt below tells the model to emit "" for a missing
+# field (matching the exact contract it was given), not null.
+# `schemas/extraction.py:TestReportFormFields` still folds a blank string
+# to `None` on the way into our own models, so the rest of the app keeps
+# treating "missing" as `None` everywhere — only the wire format Gemini
+# is asked for here differs.
+def _trf_string(description: str) -> dict:
+    return {"description": description, "type": "string"}
+
+
+TEST_REPORT_FORM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "Client_Code": _trf_string("Client code printed at the top of the form, above Client_Name"),
+        "Client_Name": _trf_string("Client name printed at the top of the form"),
+        "Patient Name": _trf_string("Patient's full name"),
+        "AGE": _trf_string("Patient's age, digits only"),
+        "Sex": _trf_string("Male/Female/whichever third option the form itself offers"),
+        "Contact_Number": _trf_string("Patient's (not the doctor's) contact number"),
+        "DOCTOR_NAME": _trf_string("Referring doctor's name, or 'Self'"),
+        "TRF_Number": _trf_string("Digits-only TRF number read from the barcode"),
+        "TestName": _trf_string("Comma-separated list of ordered test names"),
+        "TestCode": _trf_string("Comma-separated list of ordered test codes"),
+        "SampleCollectionDateTime": _trf_string("Sample collection date/time as YYYY-MM-DD HH:MM:SS"),
+        "SAMPLE_TYPE": _trf_string("Comma-separated Specimen Type selections, e.g. 'Serum,Plasma-Flouride'"),
+    },
+    "required": [
+        "Client_Code",
+        "Client_Name",
+        "Patient Name",
+        "AGE",
+        "Sex",
+        "Contact_Number",
+        "DOCTOR_NAME",
+        "TRF_Number",
+        "TestName",
+        "TestCode",
+        "SampleCollectionDateTime",
+        "SAMPLE_TYPE",
+    ],
+    "additionalProperties": False,
+}
+
 # json_schema per supported document type.
 _SCHEMA_BY_TYPE: dict[DocumentType, dict] = {
     DocumentType.PAN_CARD: PAN_CARD_SCHEMA,
     DocumentType.AADHAAR_CARD: AADHAAR_CARD_SCHEMA,
     DocumentType.INVOICE: INVOICE_SCHEMA,
     DocumentType.MEDICAL_PRESCRIPTION: PRESCRIPTION_SCHEMA,
+    DocumentType.TEST_REPORT_FORM: TEST_REPORT_FORM_SCHEMA,
+}
+
+# Test Report Form extraction follows a much more detailed, hand-tuned
+# spec than the other three document types (client code cleanup rules,
+# barcode digit-only normalization, multi-select Specimen Type handling,
+# etc.) — verbatim rather than run through `_BASE_INSTRUCTIONS.format()`,
+# because that generic template ("extract exactly as they appear ... set
+# to null if missing") actively conflicts with several of the rules
+# below (e.g. "" for missing, not null; strip punctuation from
+# Client_Code/TRF_Number; fold near-miss OCR of "Self" back to "Self").
+# `_CUSTOM_SYSTEM_PROMPTS` is checked first in `build_extraction_prompt`
+# so a document type can opt out of the shared template entirely.
+_TEST_REPORT_FORM_PROMPT = """You are given a document of a Test Report Form (TRF)
+For date and time fields, convert them to "YYYY-MM-DD HH:MM:SS" format. If only a date is available, use "YYYY-MM-DD 00:00:00".
+If the time for both collection or birth is written in AM or PM format convert it to 'HH:MM:SS' format
+
+Return the result as a valid JSON object strictly following this structure:
+
+Extraction Rules:
+- Client_Code is present at the top of the from in case when extract the client code if there is any dot
+  "." in the middel of the code it should be removed and Client_Code does not starts with "-" make sure
+  if in case client code starts with "-" remove that like "Client_Code":"HEC 124.65" become "Client_Code":"HEC 12465"
+  and "Client_Code":"-BCL-13539" becomes "BCL-13539"
+- Client_Code is at the top just above Client_Name
+- Extract Patient Name from the document
+- Extract values only from fields that are filled or have a checked/ticked box next to them.
+- Be precise with date/time
+- Extract the SAMPLE_TYPE and Sex in from the document only.
+- In Sex u have give json like this "Sex":"Male/Female/[3rd type from the form only]" here it means the
+  1st and 2nd option are mostly male or female and the 3rd option whatever selection in done in the form like
+  "Others" or "Transgender".
+- Recheck AGE twice when extracting and extract only the number.
+- Contact_Number should be Patient not the doctor's you can get that from document.
+  If not present return "" like "Contact_Number": ""
+- if in case no data is present for the respective field then the just return "" like if DOCTOR_NAME is
+  not present then put "DOCTOR_NAME":""
+- TRF_Number extract only the number present in the barcode on the document like number present in the
+  barcode is "TRF 335252" then the output will be "TRF_Number":"335252".
+- TRF_Number there should be no special character between it like if "TRF_Number":"335.252" becomes "TRF_Number":"335252"
+  and  "TRF_Number":"3455-56" becomes "TRF_Number":"345556".
+- DOCTOR_NAME extract this field from the Referring doctor name or wherever it is present.If DOCTOR_NAME starts with "S" and
+  have 4 letters in it and is closer to "Self" then the value is "Self" like "DOCTOR_NAME": "Solf" should
+  become "DOCTOR_NAME": "Self".
+- SAMPLE_TYPE should be extract from the Specimen Type section present in the form.
+  Specimen Type section is a checkbox section or written or marked and there can be various abnormality present in it like
+  sticker to be present over the option, sticker to be present besides the option, various unnecessary
+  pen marks to be present in the section which have no relation to the selection u should avoid those also,
+  incase if the option is encircled then that means that option is selected.
+- there can be multiple selection present in the Specimen Type section so according to those add them in the
+  SAMPLE_TYPE like "SAMPLE_TYPE":"serum,Plasma-Flouride,WB-EDTA" , "SAMPLE_TYPE":"serum,other" incase there is no
+  selection being made in the Specimen Type section then return "SAMPLE_TYPE":"".
+- The TestName,TestCode are present but u see that its either handwriting or printed is bad in some case so according to your
+  knowledge base make that fix like if "TestCode": "PRO792" for this test "TestName": "Amfit freedon promo"
+  you find it wrong then u can fix that also "TestCode": "BRO792" and "TestName": "Ampit freedon promo"
+- The TestName,TestCode can have multiple value so add them in this only like
+  "TestCode": "PRO792, BC0683, MB004, BC0106, BC0120"
+  and "TestName": "Amfit freedon promo, I run studies, urine culture & sensitivity, G. electrolytes, G-PCBS"
+  note the TestCode can be empty so send "" like "TestCode": "".
+- SampleCollectionDateTime should be extract from Specimen Collection section where Date Time field is present
+  in the document.
+- All the fields are present apply re-verifiation if any field is left blank.
+- If in the Testname u can understand the exact data then it is fine but in case if exact data is hard to determine
+  then according to your knowledge base fix that like "TestName":"Cretime" fix that to "TestName":"Creatine".
+- In case any field is filled in a different language then extract that field in that same language no need to change
+  the language to english or any other if field value is present int hindi,gujarati,punjabi or any language
+  extract in that language only.
+{
+  "Client_Code":"field_value",
+  "Client_Name": "field_value",
+  "Patient Name": "field_value",
+  "AGE": "field_value",
+  "Sex":"Male/Female/[3rd type from the form only]",
+  "Contact_Number": "field_value",
+  "DOCTOR_NAME": "field_value",
+  "TRF_Number": "field_value",
+  "TestName": "field_value",
+  "TestCode": "field_value",
+  "SampleCollectionDateTime": "YYYY-MM-DD HH:MM:SS",
+  "SAMPLE_TYPE": "name of the Specimen values",
+}"""
+
+_CUSTOM_SYSTEM_PROMPTS: dict[DocumentType, str] = {
+    DocumentType.TEST_REPORT_FORM: _TEST_REPORT_FORM_PROMPT,
 }
 
 
@@ -138,7 +267,9 @@ def build_extraction_prompt(document_type: DocumentType, extracted_text: str) ->
     `classification_prompt.build_classification_prompt`: this module
     stays free of any dependency on the `google-genai` package.
     """
-    system_instruction = _BASE_INSTRUCTIONS.format(document_type=document_type.value)
+    system_instruction = _CUSTOM_SYSTEM_PROMPTS.get(
+        document_type, _BASE_INSTRUCTIONS.format(document_type=document_type.value)
+    )
     user_content = (
         f"Extract fields from the following {document_type.value} OCR text.\n\n"
         "--- OCR TEXT START ---\n"

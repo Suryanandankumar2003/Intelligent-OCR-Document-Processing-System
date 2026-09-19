@@ -22,23 +22,65 @@ from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
 from core.document_types import DocumentType
+from core.review_status import ReviewStatus
 from database import crud
 from database.session import get_db
-from services.export_service import write_documents_xlsx
+from services.export_service import iter_matching_search, write_documents_xlsx
 
 router = APIRouter(prefix="/documents", tags=["Export"])
 
 _XLSX_MEDIA_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
+def _download_name(document_type: Optional[DocumentType], review_status: Optional[ReviewStatus]) -> str:
+    """
+    A filename that says what's in the file, not just when it was made.
+
+    This is the name the browser actually saves the download under (via
+    `Content-Disposition`, which the frontend reads — see `app.py`'s
+    `expose_headers`), so a reviewer who exports "approved invoices"
+    twice a week ends up with a folder they can read, rather than a pile
+    of identical `documents_export_*.xlsx`. The free-text `search` filter
+    is deliberately left out of the name: it's arbitrary user input, and
+    sanitizing it into something safe on every filesystem is more risk
+    than the extra word is worth.
+    """
+    parts = ["documents_export"]
+    if review_status is not None:
+        parts.append(review_status.value)
+    if document_type is not None:
+        parts.append(document_type.value)
+    parts.append(f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}")
+    # Spaces would land in the header's quoted filename legally, but
+    # they survive the round-trip badly across browsers and shells.
+    return "_".join(part.replace(" ", "-") for part in parts) + ".xlsx"
+
+
+# Declared on a router that `api/router.py` includes *before*
+# `documents.router`, which owns `GET /documents/{filename}` under the
+# same prefix. Starlette matches routes in registration order, so that
+# order is what guarantees this endpoint is reached rather than being
+# swallowed as a document whose filename happens to be "export" — and
+# it's why this file's router must keep being included first.
 @router.get(
     "/export/xlsx",
     response_class=FileResponse,
-    summary="Download an xlsx export of every processed document",
+    summary="Download an xlsx export of the matching processed documents",
 )
 def export_documents_xlsx(
     document_type: Optional[DocumentType] = Query(
         default=None, description="Only export documents of this type. Omitted: every type."
+    ),
+    review_status: Optional[ReviewStatus] = Query(
+        default=None,
+        description="Only export documents in this review state. Omitted: every state.",
+    ),
+    search: Optional[str] = Query(
+        default=None,
+        description=(
+            "Only export documents whose filename or extracted field values contain this text "
+            "(case-insensitive). Matches the documents list screen's search box exactly."
+        ),
     ),
     uploaded_from: Optional[datetime] = Query(
         default=None, description="Only export documents uploaded on or after this timestamp."
@@ -61,10 +103,24 @@ def export_documents_xlsx(
     out) — so a failed or abandoned download doesn't leak a file, but the
     file also isn't deleted out from under a download that's still in
     progress.
+
+    Every filter is optional and they compose, which is what lets one
+    endpoint serve all three things the documents screen offers: no
+    params at all is "export everything", the screen's active filters
+    passed through is "export what I'm looking at", and
+    `review_status=Reviewed` alone is "export the approved set".
     """
     documents = crud.iter_documents_for_export(
-        db, document_type=document_type, uploaded_from=uploaded_from, uploaded_to=uploaded_to
+        db,
+        document_type=document_type,
+        review_status=review_status,
+        uploaded_from=uploaded_from,
+        uploaded_to=uploaded_to,
     )
+    # Wraps the iterator rather than consuming it — the export stays
+    # streaming end to end. See `iter_matching_search` for why this one
+    # filter isn't a WHERE clause like the others.
+    documents = iter_matching_search(documents, search)
 
     fd, tmp_path = tempfile.mkstemp(suffix=".xlsx", prefix="documents_export_")
     os.close(fd)  # Only the path is needed; openpyxl opens and writes the file itself.
@@ -72,10 +128,9 @@ def export_documents_xlsx(
 
     write_documents_xlsx(documents, destination)
 
-    download_name = f"documents_export_{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}.xlsx"
     return FileResponse(
         destination,
         media_type=_XLSX_MEDIA_TYPE,
-        filename=download_name,
+        filename=_download_name(document_type, review_status),
         background=BackgroundTask(destination.unlink, missing_ok=True),
     )

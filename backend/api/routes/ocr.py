@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from api.processing_metrics import track_processing_stage
 from core.processing_event import ProcessingStage
+from database import crud
 from database.session import get_db
 from schemas.ocr import OCRResultResponse
 from services.ocr_service import extract_text_from_stored_file
@@ -36,4 +37,9 @@ async def run_ocr(filename: str, db: Session = Depends(get_db)) -> OCRResultResp
     """
     with track_processing_stage(db, filename=filename, stage=ProcessingStage.OCR):
         result = await extract_text_from_stored_file(filename)
+    # Stored so the transcript outlives this response — see
+    # `database.models.Document.ocr_text`. Best-effort by design: a failed
+    # write is logged, not raised, and the text is in the response either
+    # way.
+    crud.save_ocr_text(db, filename=filename, ocr_text=result["extracted_text"])
     return OCRResultResponse(**result)

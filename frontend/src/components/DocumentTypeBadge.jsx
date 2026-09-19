@@ -1,5 +1,5 @@
 /**
- * Shows the classified document type as a colored pill, plus Vertex
+ * Shows the classified document type as a colored chip, plus Vertex
  * AI's confidence as a percentage.
  *
  * `confidence` arrives from the backend as a decimal string like "0.93"
@@ -7,30 +7,52 @@
  * in the API contract on purpose). Parsing it into a percentage is a
  * pure display concern, so it happens here at the UI boundary rather
  * than asking the backend to pre-format a percentage string.
+ *
+ * The chip's color comes from the same `--chart-*` custom properties the
+ * analytics charts use, not from a second palette defined here: a PAN
+ * Card is the same blue in a table row as it is in the "documents by
+ * type" bar chart, in both light and dark mode, because there is only
+ * one definition of that blue (see theme/GlobalStyles.jsx).
  */
-import './DocumentTypeBadge.css'
+import { Box, Chip, Typography } from '@mui/material'
 
-const TYPE_STYLES = {
-  'PAN Card': 'document-type-badge--pan',
-  'Aadhaar Card': 'document-type-badge--aadhaar',
-  Invoice: 'document-type-badge--invoice',
-  'Medical Prescription': 'document-type-badge--prescription',
-  Unknown: 'document-type-badge--unknown',
+const COLOR_BY_TYPE = {
+  'PAN Card': 'var(--chart-pan)',
+  'Aadhaar Card': 'var(--chart-aadhaar)',
+  Invoice: 'var(--chart-invoice)',
+  'Medical Prescription': 'var(--chart-prescription)',
+  'Test Report Form': 'var(--chart-trf)',
+  Unknown: 'var(--chart-unknown)',
 }
 
-export default function DocumentTypeBadge({ documentType, confidence }) {
-  const variant = TYPE_STYLES[documentType] ?? TYPE_STYLES.Unknown
-  const confidencePercent = Number.parseFloat(confidence)
-  const showConfidence = Number.isFinite(confidencePercent)
+export default function DocumentTypeBadge({ documentType, confidence, size = 'small' }) {
+  const color = COLOR_BY_TYPE[documentType] ?? COLOR_BY_TYPE.Unknown
+  const confidenceFraction = Number.parseFloat(confidence)
+  const showConfidence = Number.isFinite(confidenceFraction)
 
   return (
-    <div className="document-type-badge-group">
-      <span className={`document-type-badge ${variant}`}>{documentType}</span>
+    <Box sx={{ display: 'inline-flex', alignItems: 'center', gap: 1, flexWrap: 'wrap' }}>
+      <Chip
+        label={documentType}
+        size={size}
+        variant="outlined"
+        sx={{
+          // A tinted fill plus a full-strength border and label, rather
+          // than a solid chip: at the density of a table this reads as a
+          // category marker instead of a row of competing buttons, and
+          // the `color-mix` keeps one hue definition working on both a
+          // white and a near-black surface.
+          color,
+          borderColor: color,
+          backgroundColor: `color-mix(in srgb, ${color} 12%, transparent)`,
+          fontWeight: 650,
+        }}
+      />
       {showConfidence && (
-        <span className="document-type-badge__confidence">
-          {Math.round(confidencePercent * 100)}% confidence
-        </span>
+        <Typography variant="caption" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>
+          {Math.round(confidenceFraction * 100)}% confidence
+        </Typography>
       )}
-    </div>
+    </Box>
   )
 }

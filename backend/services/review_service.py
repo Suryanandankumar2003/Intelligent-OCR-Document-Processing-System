@@ -136,7 +136,10 @@ def apply_corrections(
     except ValidationError as exc:
         raise ReviewValidationError(str(exc)) from exc
 
-    reviewed_data = validated.model_dump(mode="json")
+    # by_alias=True: a no-op for every schema except TestReportFormFields,
+    # whose "Patient Name" key isn't a valid Python field name and is
+    # only reachable through its alias (see schemas/extraction.py).
+    reviewed_data = validated.model_dump(mode="json", by_alias=True)
     _reject_discarded_values(corrected_fields, reviewed_data)
 
     correction_records = [

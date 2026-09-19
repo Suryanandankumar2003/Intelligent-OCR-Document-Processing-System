@@ -20,10 +20,14 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from database import analytics
+from database import analytics, batch_analytics
 from database.session import get_db
 from schemas.analytics import (
     AnalyticsSummaryResponse,
+    BatchAnalyticsSummary,
+    BatchStatusCount,
+    BatchVolumePoint,
+    BatchVolumeResponse,
     DailyTrendPoint,
     DailyTrendResponse,
     DocumentTypeCount,
@@ -100,3 +104,63 @@ def get_daily_trend(
     return DailyTrendResponse(
         days=days, trend=[DailyTrendPoint(**point) for point in trend]
     )
+
+
+@router.get(
+    "/batches",
+    response_model=BatchAnalyticsSummary,
+    summary="Batch throughput, success rate, and sizing metrics",
+)
+def get_batch_analytics(db: Session = Depends(get_db)) -> BatchAnalyticsSummary:
+    """
+    The batch half of the dashboard.
+
+    Its own endpoint rather than extra fields on `/summary`, so an
+    install that has never used batch processing doesn't pay for these
+    queries on every dashboard load — and so the two halves can be
+    refreshed independently as the frontend already does for the trend.
+
+    Like `/summary`, computed fresh on every call rather than cached: the
+    same handful of GROUP BY/AVG queries either way, and a dashboard that
+    can silently show stale numbers is a worse failure mode than one
+    extra query per page load.
+    """
+    outcomes = batch_analytics.file_outcome_totals(db)
+    return BatchAnalyticsSummary(
+        generated_at=datetime.now(timezone.utc),
+        total_batches=batch_analytics.total_batches(db),
+        batches_by_status=[
+            BatchStatusCount(status=status, count=count)
+            for status, count in batch_analytics.batch_counts_by_status(db).items()
+        ],
+        total_files=outcomes["total_files"],
+        successful_files=outcomes["successful_files"],
+        failed_files=outcomes["failed_files"],
+        processing_files=outcomes["processing_files"],
+        success_rate=outcomes["success_rate"],
+        failure_rate=outcomes["failure_rate"],
+        average_file_processing_seconds=batch_analytics.average_file_processing_seconds(db),
+        average_batch_size=batch_analytics.average_batch_size(db),
+        average_batch_duration_seconds=batch_analytics.average_batch_duration_seconds(db),
+    )
+
+
+@router.get(
+    "/batch-volume",
+    response_model=BatchVolumeResponse,
+    summary="Batches created and files completed, per day",
+)
+def get_batch_volume(
+    days: int = Query(default=30, ge=1, le=365, description="Size of the trailing window, including today"),
+    db: Session = Depends(get_db),
+) -> BatchVolumeResponse:
+    """
+    Daily batch volume alongside the per-file outcomes that landed each
+    day.
+
+    Same windowing contract as `/daily-trend`: zero-filled, oldest day
+    first, capped at 365 so this stays a "how are we trending lately"
+    chart rather than an open-ended history export.
+    """
+    trend = batch_analytics.daily_batch_volume(db, days=days)
+    return BatchVolumeResponse(days=days, trend=[BatchVolumePoint(**point) for point in trend])

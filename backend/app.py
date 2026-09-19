@@ -15,6 +15,10 @@ from fastapi.responses import JSONResponse
 from api.router import api_router
 from core.config import get_settings
 from core.exceptions import (
+    BatchError,
+    BatchFileNotFoundError,
+    BatchNotFoundError,
+    BatchTooLargeError,
     ClassificationAuthenticationError,
     ClassificationError,
     ClassificationParsingError,
@@ -24,6 +28,7 @@ from core.exceptions import (
     DocumentNotYetExtractedError,
     DocumentPersistenceError,
     DocumentUploadError,
+    EmptyBatchError,
     EmptyExtractedTextError,
     EmptyFileError,
     ExtractionAuthenticationError,
@@ -35,6 +40,7 @@ from core.exceptions import (
     ExtractionUnsupportedDocumentTypeError,
     FileSaveError,
     FileTooLargeError,
+    NothingToRetryError,
     OCRAuthenticationError,
     OCRDocumentNotFoundError,
     OCRError,
@@ -252,6 +258,44 @@ def register_exception_handlers(app: FastAPI) -> None:
         logger.exception("Unhandled review error: %s", exc)
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
+    # --- Batch processing ---
+    #
+    # Every member is 4xx. A *file* failing inside a batch never reaches
+    # here at all — it is recorded on its `batch_files` row and the batch
+    # continues — so everything in this family describes a request that
+    # is wrong, not a document that went wrong.
+
+    @app.exception_handler(BatchNotFoundError)
+    async def handle_batch_not_found(request: Request, exc: BatchNotFoundError) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(BatchFileNotFoundError)
+    async def handle_batch_file_not_found(request: Request, exc: BatchFileNotFoundError) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(BatchTooLargeError)
+    async def handle_batch_too_large(request: Request, exc: BatchTooLargeError) -> JSONResponse:
+        # 413, matching the single-file `FileTooLargeError` above: too
+        # many files and too many bytes are the same class of problem
+        # from the caller's side.
+        return JSONResponse(status_code=413, content={"detail": str(exc)})
+
+    @app.exception_handler(EmptyBatchError)
+    async def handle_empty_batch(request: Request, exc: EmptyBatchError) -> JSONResponse:
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+    @app.exception_handler(NothingToRetryError)
+    async def handle_nothing_to_retry(request: Request, exc: NothingToRetryError) -> JSONResponse:
+        # 409, not 400: the request is well-formed and the batch exists —
+        # it is the batch's current state that makes the operation
+        # inapplicable. Same reasoning as `DocumentNotYetExtractedError`.
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(BatchError)
+    async def handle_generic_batch_error(request: Request, exc: BatchError) -> JSONResponse:
+        logger.exception("Unhandled batch error: %s", exc)
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
+
     # --- Database ---
     #
     # A write failure here is unambiguously our side (disk full, the
@@ -277,6 +321,16 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        # A cross-origin response only exposes a handful of "safelisted"
+        # headers to JavaScript; everything else is readable by the
+        # browser but invisible to `fetch`/Axios unless the server names
+        # it here. Content-Disposition is not safelisted, so without this
+        # the xlsx download would arrive with its server-chosen filename
+        # (`documents_export_<timestamp>.xlsx`) stripped from the
+        # frontend's view, and the browser would save it under a generic
+        # name. Note `allow_headers=["*"]` above does not cover this —
+        # that governs *request* headers the client may send.
+        expose_headers=["Content-Disposition"],
     )
 
     register_exception_handlers(app)
@@ -287,6 +341,21 @@ def create_app() -> FastAPI:
     def on_startup() -> None:
         settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         init_db()
+
+    @app.on_event("shutdown")
+    def on_shutdown() -> None:
+        """
+        Stop the inline batch executor, if one was ever started.
+
+        Does not wait for queued files: a batch can have hours of work
+        outstanding, and a Ctrl-C that blocks on it is not a shutdown.
+        Files left mid-flight stay `Processing` and are recovered by a
+        batch retry, which is exactly the case
+        `batch_dispatch.retry_batch` handles.
+        """
+        from services.batch_dispatch import shutdown_inline_pool
+
+        shutdown_inline_pool(wait=False)
 
     return app
 

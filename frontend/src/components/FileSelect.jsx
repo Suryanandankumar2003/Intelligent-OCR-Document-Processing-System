@@ -9,17 +9,32 @@
  * Restricted to exactly the file types the backend accepts (see
  * backend/core/file_types.py's ALLOWED_CONTENT_TYPES) so a user gets
  * immediate feedback instead of discovering the mismatch only after a
- * failed upload.
+ * failed upload — and a rejected drop now says *why*, rather than
+ * silently doing nothing as it used to.
+ *
+ * Built on MUI's `ButtonBase` rather than a styled `<div role="button">`:
+ * it brings the focus ring, the ripple, and the Enter/Space handling
+ * that the hand-rolled version had to reimplement, and it stays in step
+ * with the theme's focus styling automatically.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
-import './FileSelect.css'
+import { Box, ButtonBase, Stack, Typography } from '@mui/material'
+import CloudUploadIcon from '@mui/icons-material/CloudUpload'
+import InsertDriveFileIcon from '@mui/icons-material/InsertDriveFile'
 
 const ACCEPTED_TYPES = ['application/pdf', 'image/png', 'image/jpeg']
 const ACCEPTED_EXTENSIONS = '.pdf,.png,.jpg,.jpeg'
 
+function formatBytes(bytes) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
 export default function FileSelect({ selectedFile, onFileSelect, disabled }) {
   const inputRef = useRef(null)
   const [isDragActive, setIsDragActive] = useState(false)
+  const [rejection, setRejection] = useState(null)
   const [previewUrl, setPreviewUrl] = useState(null)
 
   // Builds a local thumbnail for image files only (a PDF has nothing
@@ -44,7 +59,15 @@ export default function FileSelect({ selectedFile, onFileSelect, disabled }) {
 
   const validateAndSelect = useCallback(
     (file) => {
-      if (!file || !ACCEPTED_TYPES.includes(file.type)) return
+      if (!file) return
+      if (!ACCEPTED_TYPES.includes(file.type)) {
+        // The old version returned silently here, which made dropping a
+        // .docx look like the app had frozen. Naming the file and the
+        // accepted set is the difference between a bug and a rule.
+        setRejection(`"${file.name}" isn't a supported file type. Choose a PDF, PNG, or JPG.`)
+        return
+      }
+      setRejection(null)
       onFileSelect(file)
     },
     [onFileSelect],
@@ -69,67 +92,127 @@ export default function FileSelect({ selectedFile, onFileSelect, disabled }) {
     event.target.value = ''
   }
 
-  const openFileDialog = () => {
-    if (!disabled) inputRef.current?.click()
+  const borderColor = () => {
+    if (isDragActive) return 'primary.main'
+    if (rejection) return 'error.main'
+    return 'divider'
   }
 
   return (
-    <div
-      className={[
-        'file-select',
-        isDragActive && 'file-select--active',
-        disabled && 'file-select--disabled',
-      ]
-        .filter(Boolean)
-        .join(' ')}
-      onDragOver={(event) => {
-        event.preventDefault()
-        if (!disabled) setIsDragActive(true)
-      }}
-      onDragLeave={() => setIsDragActive(false)}
-      onDrop={handleDrop}
-      onClick={openFileDialog}
-      role="button"
-      tabIndex={0}
-      aria-disabled={disabled}
-      onKeyDown={(event) => {
-        if (event.key === 'Enter' || event.key === ' ') {
-          event.preventDefault()
-          openFileDialog()
-        }
-      }}
-    >
-      <input
-        ref={inputRef}
-        type="file"
-        accept={ACCEPTED_EXTENSIONS}
-        onChange={handleInputChange}
+    <Box>
+      <ButtonBase
+        component="div"
+        role="button"
+        tabIndex={disabled ? -1 : 0}
+        aria-disabled={disabled}
+        aria-label="Choose a document to process"
         disabled={disabled}
-        className="file-select__input"
-        aria-hidden="true"
-        tabIndex={-1}
-      />
+        onClick={() => !disabled && inputRef.current?.click()}
+        onDragOver={(event) => {
+          event.preventDefault()
+          if (!disabled) setIsDragActive(true)
+        }}
+        onDragLeave={() => setIsDragActive(false)}
+        onDrop={handleDrop}
+        sx={{
+          width: '100%',
+          display: 'block',
+          textAlign: 'left',
+          p: 3,
+          borderRadius: 2,
+          border: '2px dashed',
+          borderColor: borderColor(),
+          bgcolor: isDragActive ? 'action.hover' : 'background.paper',
+          transition: 'border-color 150ms ease, background-color 150ms ease',
+          opacity: disabled ? 0.6 : 1,
+          cursor: disabled ? 'not-allowed' : 'pointer',
+          '&:hover': { borderColor: disabled ? borderColor() : 'primary.main' },
+        }}
+      >
+        <input
+          ref={inputRef}
+          type="file"
+          accept={ACCEPTED_EXTENSIONS}
+          onChange={handleInputChange}
+          disabled={disabled}
+          // Visually hidden rather than `display: none`: a hidden input
+          // is still the element that opens the OS dialog, and some
+          // browsers refuse to click one that isn't rendered at all.
+          style={{ position: 'absolute', width: 1, height: 1, opacity: 0, pointerEvents: 'none' }}
+          aria-hidden="true"
+          tabIndex={-1}
+        />
 
-      {selectedFile ? (
-        <div className="file-select__preview">
-          {previewUrl && <img src={previewUrl} alt="" className="file-select__thumbnail" />}
-          <div>
-            <p className="file-select__filename">{selectedFile.name}</p>
-            <p className="file-select__filesize">{formatBytes(selectedFile.size)}</p>
-          </div>
-        </div>
-      ) : (
-        <div className="file-select__prompt">
-          <p>Drag &amp; drop a PAN card, Aadhaar card, invoice, or prescription</p>
-          <p className="file-select__hint">or click to browse — PDF, PNG, or JPG, up to 10 MB</p>
-        </div>
+        {selectedFile ? (
+          <Stack direction="row" spacing={2} sx={{ alignItems: 'center' }}>
+            {previewUrl ? (
+              <Box
+                component="img"
+                src={previewUrl}
+                alt=""
+                sx={{
+                  width: 64,
+                  height: 64,
+                  objectFit: 'cover',
+                  borderRadius: 1.5,
+                  border: 1,
+                  borderColor: 'divider',
+                  flexShrink: 0,
+                }}
+              />
+            ) : (
+              <Box
+                sx={{
+                  width: 64,
+                  height: 64,
+                  borderRadius: 1.5,
+                  display: 'grid',
+                  placeItems: 'center',
+                  bgcolor: 'action.hover',
+                  color: 'text.secondary',
+                  flexShrink: 0,
+                }}
+              >
+                <InsertDriveFileIcon />
+              </Box>
+            )}
+            <Box sx={{ minWidth: 0 }}>
+              <Typography variant="subtitle2" noWrap title={selectedFile.name}>
+                {selectedFile.name}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                {formatBytes(selectedFile.size)}
+              </Typography>
+              <Typography variant="caption" color="primary.main" sx={{ display: 'block', mt: 0.5 }}>
+                Click or drop to replace
+              </Typography>
+            </Box>
+          </Stack>
+        ) : (
+          <Stack spacing={1} sx={{ alignItems: 'center', py: 1.5 }}>
+            <CloudUploadIcon
+              sx={{ fontSize: 36, color: isDragActive ? 'primary.main' : 'text.secondary' }}
+            />
+            <Typography variant="subtitle1" sx={{ fontWeight: 600, textAlign: 'center' }}>
+              Drag &amp; drop a document here
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center' }}>
+              or click to browse — PDF, PNG, or JPG, up to 10&nbsp;MB
+            </Typography>
+          </Stack>
+        )}
+      </ButtonBase>
+
+      {rejection && (
+        <Typography
+          variant="caption"
+          color="error.main"
+          sx={{ display: 'block', mt: 1 }}
+          role="alert"
+        >
+          {rejection}
+        </Typography>
       )}
-    </div>
+    </Box>
   )
-}
-
-function formatBytes(bytes) {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }

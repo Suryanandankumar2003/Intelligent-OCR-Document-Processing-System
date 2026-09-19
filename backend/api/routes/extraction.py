@@ -73,6 +73,7 @@ async def extract_document_fields(
     """
     with track_processing_stage(db, filename=filename, stage=ProcessingStage.OCR):
         ocr_result = await extract_text_from_stored_file(filename)
+    crud.save_ocr_text(db, filename=filename, ocr_text=ocr_result["extracted_text"])
 
     resolved_type = document_type
     if resolved_type is None:
@@ -87,7 +88,7 @@ async def extract_document_fields(
         db,
         filename=filename,
         document_type=resolved_type,
-        extracted_data=fields.model_dump(mode="json"),
+        extracted_data=fields.model_dump(mode="json", by_alias=True),
     )
 
     return fields

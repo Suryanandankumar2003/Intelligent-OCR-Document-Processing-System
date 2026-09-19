@@ -4,6 +4,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from core.batch_status import BatchStatus
 from core.document_types import DocumentType
 from core.processing_event import ProcessingStage
 
@@ -75,3 +76,64 @@ class DailyTrendResponse(BaseModel):
 
     days: int = Field(..., description="Size of the requested window, including today")
     trend: list[DailyTrendPoint] = Field(..., description="Oldest day first")
+
+
+class BatchStatusCount(BaseModel):
+    """How many batches are currently in one status."""
+
+    status: BatchStatus
+    count: int
+
+
+class BatchAnalyticsSummary(BaseModel):
+    """
+    The batch half of the analytics dashboard.
+
+    A separate response from `AnalyticsSummaryResponse` rather than more
+    fields on it, for the same reason the daily trend is its own
+    endpoint: the existing summary is about documents and pipeline
+    stages, this is about batches and their files, and a dashboard that
+    shows only the document cards (because batching was never used)
+    should not pay for these queries on every load.
+
+    Every rate is `Optional` and is `None` — never `0.0` — when nothing
+    has been processed yet. A dashboard reporting a 0% success rate
+    before anything has run is stating a falsehood, not a default.
+    """
+
+    generated_at: datetime
+    total_batches: int
+    batches_by_status: list[BatchStatusCount]
+    total_files: int = Field(..., description="Files across every batch, in any state")
+    successful_files: int
+    failed_files: int
+    processing_files: int
+    success_rate: Optional[float] = Field(
+        default=None,
+        description="Successes over *processed* files (successes + failures), not over all files",
+    )
+    failure_rate: Optional[float] = Field(default=None, description="Failures over processed files")
+    average_file_processing_seconds: Optional[float] = Field(
+        default=None, description="Mean full-pipeline wall-clock time for one successful document"
+    )
+    average_batch_size: Optional[float] = Field(default=None, description="Mean files per batch")
+    average_batch_duration_seconds: Optional[float] = Field(
+        default=None, description="Mean time from a batch's first file starting to its last finishing"
+    )
+
+
+class BatchVolumePoint(BaseModel):
+    """One day of batch activity."""
+
+    date: date
+    batches_created: int
+    files_submitted: int = Field(..., description="Files belonging to batches created on this day")
+    files_succeeded: int = Field(..., description="Files that *finished* successfully on this day")
+    files_failed: int
+
+
+class BatchVolumeResponse(BaseModel):
+    """Daily batch volume over a trailing window, oldest day first."""
+
+    days: int
+    trend: list[BatchVolumePoint]

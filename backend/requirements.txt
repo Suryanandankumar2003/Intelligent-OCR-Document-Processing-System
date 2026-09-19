@@ -11,3 +11,11 @@ google-genai==2.24.0
 pypdf==6.19.0
 pandas==3.0.6
 openpyxl==3.1.5
+
+# --- Batch processing ---
+# Celery 5.4 is the last line that still starts cleanly on Windows with
+# the threads/solo pools. Prefork needs fork(), which Windows lacks;
+# see worker/celery_app.py. Pinned rather than floated for that reason.
+celery==5.4.0
+# The Redis transport for Celery, plus the client the broker probe uses.
+redis==5.2.1

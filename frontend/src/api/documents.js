@@ -11,6 +11,7 @@
  * exception handlers), so there is nothing to validate or reshape here.
  */
 import apiClient from './client'
+import { filenameFromContentDisposition } from '../utils/download'
 
 /**
  * POST /upload — stores the file and returns its metadata (most
@@ -42,6 +43,86 @@ export async function uploadDocument(file, { onUploadProgress } = {}) {
   return response.data
 }
 
+/**
+ * GET /document-types — the document types field extraction actually
+ * supports, for the manual-classification selector.
+ *
+ * Fetched rather than hardcoded so the options can't offer a type the
+ * backend would then reject with a 422 — the whole failure this screen
+ * exists to prevent. See backend/api/routes/document_types.py.
+ */
+export async function listExtractableDocumentTypes() {
+  const response = await apiClient.get('/document-types')
+  return response.data
+}
+
+/**
+ * GET /documents — one page of stored document records, most recently
+ * uploaded first (see backend/api/routes/documents.py).
+ *
+ * `limit` is capped at 500 by the backend, and the response is a bare
+ * array with no total count, so a caller that wants "every document"
+ * pages until it gets a short batch — that's what `useDocuments` does.
+ */
+export async function listDocuments({ skip = 0, limit = 100, documentType } = {}) {
+  const response = await apiClient.get('/documents', {
+    params: { skip, limit, ...(documentType ? { document_type: documentType } : {}) },
+  })
+  return response.data
+}
+
+/**
+ * GET /documents/export/xlsx — the matching documents as one Excel
+ * workbook, returned as `{ blob, filename }` for the caller to save.
+ *
+ * Every filter is optional and they compose, which is what lets this one
+ * function serve all three of the export buttons: no arguments is
+ * "everything", the list screen's active filters is "what I'm looking
+ * at", and `{ reviewStatus: 'Reviewed' }` is "the approved set". The
+ * `search` argument matches the same way the list's search box does —
+ * filename plus current-best field values, case-insensitive — because
+ * the backend deliberately mirrors `utils/documentRecords.js` there
+ * (see backend/services/export_service.py's `iter_matching_search`).
+ *
+ * Two things here that no other call in this file needs:
+ *
+ *   * `responseType: 'blob'`. Without it Axios decodes the body as text
+ *     (its default), which silently corrupts binary content — the file
+ *     downloads, opens, and Excel reports it as damaged. This is the
+ *     single most important line in the function.
+ *   * the `Content-Disposition` filename. The backend names the export
+ *     after its filters and the moment it ran
+ *     (`documents_export_Reviewed_20240115T093000Z.xlsx`), which is only
+ *     readable here because the API opts that header out of CORS's
+ *     default header hiding (see backend/app.py's `expose_headers`); the
+ *     fallback below covers the case where it doesn't arrive.
+ *
+ * Returning the blob rather than downloading it keeps this module what
+ * every other function in it already is — one HTTP call, no side
+ * effects — leaving the "save it to disk" step to `useDocumentExport`.
+ */
+export async function exportDocumentsXlsx({ documentType, reviewStatus, search } = {}) {
+  const response = await apiClient.get('/documents/export/xlsx', {
+    // Empty/absent filters are dropped rather than sent as empty
+    // strings: `?document_type=` would fail the backend's enum
+    // validation with a 422 instead of meaning "no filter".
+    params: {
+      ...(documentType ? { document_type: documentType } : {}),
+      ...(reviewStatus ? { review_status: reviewStatus } : {}),
+      ...(search?.trim() ? { search: search.trim() } : {}),
+    },
+    responseType: 'blob',
+  })
+
+  return {
+    blob: response.data,
+    filename: filenameFromContentDisposition(
+      response.headers['content-disposition'],
+      'documents_export.xlsx',
+    ),
+  }
+}
+
 /** POST /documents/{filename}/ocr — runs OCR (Vertex AI) on an already-uploaded file. */
 export async function runOcr(filename) {
   const response = await apiClient.post(`/documents/${encodeURIComponent(filename)}/ocr`)
@@ -63,9 +144,13 @@ export async function classifyDocument(filename) {
  * backend/api/routes/extraction.py.
  */
 export async function extractFields(filename, documentType) {
-  const response = await apiClient.post(`/documents/${encodeURIComponent(filename)}/extract`, null, {
-    params: { document_type: documentType },
-  })
+  const response = await apiClient.post(
+    `/documents/${encodeURIComponent(filename)}/extract`,
+    null,
+    {
+      params: { document_type: documentType },
+    },
+  )
   return response.data
 }
 
@@ -80,6 +165,27 @@ export async function extractFields(filename, documentType) {
  */
 export async function getDocumentReview(filename) {
   const response = await apiClient.get(`/documents/${encodeURIComponent(filename)}/review`)
+  return response.data
+}
+
+/**
+ * POST /documents/{filename}/review/decision — records a verdict on the
+ * field set exactly as it stands, without changing any of it.
+ *
+ * The action `saveDocumentReview` below deliberately cannot express.
+ * That endpoint is for corrections and rejects an empty body on purpose
+ * (backend/schemas/review.py), which left the two most common review
+ * outcomes — "the model got this right, sign it off" and "this
+ * extraction is unusable" — with nowhere to go. `decision` is
+ * `'approve'` or `'reject'`; both return the same full review shape
+ * every other review call returns, so the screen re-renders through the
+ * path it already uses.
+ */
+export async function submitReviewDecision(filename, decision) {
+  const response = await apiClient.post(
+    `/documents/${encodeURIComponent(filename)}/review/decision`,
+    { decision },
+  )
   return response.data
 }
 

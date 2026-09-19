@@ -4,7 +4,7 @@
  *
  * Collapsed by default. The history is what makes the review auditable
  * rather than merely editable, but it is evidence to be consulted, not
- * the thing a reviewer is working on — the fields above are.
+ * the thing a reviewer is working on — the fields are.
  *
  * Note the two values shown are the *original extraction* and the
  * correction, not "before and after this particular edit". A field
@@ -13,8 +13,18 @@
  * drifted from what the model read off the page", which is what the
  * backend anchors every record to (see backend/services/review_service.py).
  */
+import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
+  Box,
+  Chip,
+  Stack,
+  Typography,
+} from '@mui/material'
+import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
+import ArrowRightAltIcon from '@mui/icons-material/ArrowRightAlt'
 import { humanizeFieldName } from '../utils/fieldLabels'
-import './CorrectionHistory.css'
 
 const EMPTY_DISPLAY = '— not found —'
 
@@ -31,33 +41,63 @@ function formatTimestamp(value) {
 
 export default function CorrectionHistory({ corrections }) {
   if (corrections.length === 0) {
-    return <p className="correction-history__empty">No corrections have been saved for this document.</p>
+    return (
+      <Typography variant="caption" color="text.secondary">
+        No corrections have been saved for this document.
+      </Typography>
+    )
   }
 
   return (
-    <details className="correction-history">
-      <summary className="correction-history__summary">
-        Correction history
-        <span className="correction-history__count">{corrections.length}</span>
-      </summary>
+    // `&::before` is MUI's divider line above an accordion; hidden
+    // because this one sits alone under a form, not in a stack of
+    // siblings that needs separating.
+    <Accordion disableGutters sx={{ '&::before': { display: 'none' }, borderRadius: 2 }}>
+      <AccordionSummary expandIcon={<ExpandMoreIcon />}>
+        <Stack direction="row" spacing={1} sx={{ alignItems: 'center' }}>
+          <Typography variant="subtitle2">Correction history</Typography>
+          <Chip label={corrections.length} size="small" />
+        </Stack>
+      </AccordionSummary>
 
-      <ol className="correction-history__list">
-        {corrections.map((correction) => (
-          <li className="correction-history__item" key={correction.id}>
-            <div className="correction-history__field">{humanizeFieldName(correction.field_name)}</div>
-            <div className="correction-history__change">
-              <span className="correction-history__from">{formatValue(correction.original_value)}</span>
-              <span className="correction-history__arrow" aria-label="corrected to">
-                →
-              </span>
-              <span className="correction-history__to">{formatValue(correction.corrected_value)}</span>
-            </div>
-            <time className="correction-history__time" dateTime={correction.corrected_at}>
-              {formatTimestamp(correction.corrected_at)}
-            </time>
-          </li>
-        ))}
-      </ol>
-    </details>
+      <AccordionDetails sx={{ pt: 0 }}>
+        <Stack component="ol" spacing={1.5} sx={{ listStyle: 'none', m: 0, p: 0 }}>
+          {corrections.map((correction) => (
+            <Box
+              component="li"
+              key={correction.id}
+              sx={{ pb: 1.5, borderBottom: 1, borderColor: 'divider', '&:last-of-type': { borderBottom: 0, pb: 0 } }}
+            >
+              <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
+                {humanizeFieldName(correction.field_name)}
+              </Typography>
+
+              <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: 'center', flexWrap: 'wrap' }}>
+                <Typography
+                  variant="body2"
+                  sx={{ color: 'text.secondary', textDecoration: 'line-through' }}
+                >
+                  {formatValue(correction.original_value)}
+                </Typography>
+                <ArrowRightAltIcon fontSize="small" sx={{ color: 'text.disabled' }} aria-label="corrected to" />
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  {formatValue(correction.corrected_value)}
+                </Typography>
+              </Stack>
+
+              <Typography
+                component="time"
+                dateTime={correction.corrected_at}
+                variant="caption"
+                color="text.secondary"
+                sx={{ display: 'block', mt: 0.5 }}
+              >
+                {formatTimestamp(correction.corrected_at)}
+              </Typography>
+            </Box>
+          ))}
+        </Stack>
+      </AccordionDetails>
+    </Accordion>
   )
 }

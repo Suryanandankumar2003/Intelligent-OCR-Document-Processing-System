@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from api.processing_metrics import track_processing_stage
 from core.processing_event import ProcessingStage
+from database import crud
 from database.session import get_db
 from schemas.classification import DocumentClassificationResponse
 from services.classification_service import classify_extracted_text
@@ -41,4 +42,13 @@ async def classify_document(filename: str, db: Session = Depends(get_db)) -> Doc
         ocr_result = await extract_text_from_stored_file(filename)
     with track_processing_stage(db, filename=filename, stage=ProcessingStage.CLASSIFICATION):
         classification = await classify_extracted_text(ocr_result["extracted_text"])
+
+    # Both results are persisted here, not just returned. A document that
+    # classifies as `Unknown` stops at this endpoint — extraction has no
+    # field schema for it — so this is the only place its transcript and
+    # its verdict can be recorded. Both writes are best-effort and never
+    # fail the request; the response carries the same data regardless.
+    crud.save_ocr_text(db, filename=filename, ocr_text=ocr_result["extracted_text"])
+    crud.save_classification_result(db, filename=filename, document_type=classification["document_type"])
+
     return DocumentClassificationResponse(**classification)

@@ -36,6 +36,60 @@ class Settings(BaseSettings):
     UPLOAD_DIR: Path = BASE_DIR / "uploads"
     MAX_UPLOAD_SIZE_MB: int = 10
 
+    # --- Batch processing ---
+    #
+    # How many files one `POST /batches/upload` may carry. 500 is the
+    # stated target; the cap exists so a malformed or hostile client
+    # can't open a 50,000-part multipart request that the server would
+    # stream to disk before anything rejected it.
+    MAX_BATCH_FILES: int = 500
+    # Retries are per *file*, not per batch: one unreadable scan in a
+    # batch of 300 should exhaust its own budget and stop, not consume
+    # the batch's. Counted in `batch_files.retry_count`, which is what
+    # makes the limit survive a worker restart — a Celery-internal retry
+    # counter would not.
+    MAX_FILE_RETRIES: int = 3
+    # Hard ceiling on one file's pipeline (OCR + classify + extract).
+    # Slightly above the sum of the three Vertex timeouts below, so a
+    # task that is merely slow is killed by its own stage timeout with a
+    # precise error, and this only catches a task that is genuinely
+    # wedged.
+    BATCH_FILE_TIME_LIMIT_SECONDS: int = 300
+    # Soft limit fires first as a catchable exception, giving the task a
+    # chance to mark its file FAILED with a real message before the hard
+    # limit kills the worker thread outright.
+    BATCH_FILE_SOFT_TIME_LIMIT_SECONDS: int = 270
+
+    # --- Celery / Redis ---
+    #
+    # Both default to the same local Redis. They are separate settings
+    # because the broker (the queue) and the result backend (task return
+    # values) are separate concerns that a larger deployment routinely
+    # splits — and because pointing them at different logical databases
+    # (/0, /1) is the usual first step when queue traffic and result
+    # traffic start competing.
+    REDIS_URL: str = "redis://127.0.0.1:6379/0"
+    CELERY_BROKER_URL: str = ""
+    CELERY_RESULT_BACKEND: str = ""
+    # Worker threads per Celery process. The pipeline is I/O-bound —
+    # every stage is a network call to Vertex AI — so threads give real
+    # parallelism here despite the GIL. See `worker/celery_app.py` for
+    # why the pool is threads and not prefork on Windows.
+    CELERY_WORKER_CONCURRENCY: int = 4
+    # When Redis is unreachable, run batches in an in-process thread
+    # pool instead of refusing the upload. See
+    # `services/batch_dispatch.py` for exactly what is and isn't
+    # equivalent between the two paths.
+    BATCH_INLINE_FALLBACK: bool = True
+    # Threads used by that fallback. Deliberately smaller than the Celery
+    # default: these run inside the API process and share it with every
+    # HTTP request being served.
+    BATCH_INLINE_MAX_WORKERS: int = 2
+    # How long `POST /batches/upload` waits for the broker before giving
+    # up and falling back. Short on purpose — a dead Redis should not
+    # hold an upload response open.
+    BROKER_PROBE_TIMEOUT_SECONDS: float = 1.5
+
     # --- Google Cloud / Vertex AI ---
     # The GCP project quota/billing is charged against, and the region
     # requests are sent to. Both are required for the Vertex AI SDK's
@@ -78,6 +132,16 @@ class Settings(BaseSettings):
         case_sensitive=True,
         extra="ignore",
     )
+
+    @property
+    def celery_broker_url(self) -> str:
+        """`CELERY_BROKER_URL` if set, else `REDIS_URL` — so the common case is one setting, not three."""
+        return self.CELERY_BROKER_URL or self.REDIS_URL
+
+    @property
+    def celery_result_backend(self) -> str:
+        """Same fallback as the broker above."""
+        return self.CELERY_RESULT_BACKEND or self.REDIS_URL
 
     @property
     def cors_origins_list(self) -> List[str]:

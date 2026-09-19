@@ -19,7 +19,11 @@
       "Bash(node scripts/validate_palette.js \"#2a78d6,#eb6834,#1baf7a,#eda100\" --mode light)",
       "Bash(node scripts/validate_palette.js \"#2563eb,#16a34a\" --mode light)",
       "Bash(taskkill //F //IM python.exe //FI \"WINDOWTITLE eq *uvicorn*\")",
-      "Bash(taskkill *)"
+      "Bash(taskkill *)",
+      "Bash(python -)",
+      "Bash(python -c ' *)",
+      "Bash(./.venv/Scripts/python.exe -)",
+      "Bash(./.venv/Scripts/python.exe -m pip install pytest==8.3.4 pytest-asyncio==0.25.0)"
     ]
   }
 }

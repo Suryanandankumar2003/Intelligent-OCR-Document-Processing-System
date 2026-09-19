@@ -17,13 +17,17 @@
  * to drift apart.
  */
 import { useCallback, useEffect, useState } from 'react'
-import { getDocumentReview, saveDocumentReview } from '../api/documents'
+import { getDocumentReview, saveDocumentReview, submitReviewDecision } from '../api/documents'
 import { extractErrorMessage } from '../api/errorMessage'
 
 export function useDocumentReview(filename) {
   const [review, setReview] = useState(null)
   const [isLoading, setIsLoading] = useState(true)
   const [isSaving, setIsSaving] = useState(false)
+  // Which decision is in flight ('approve' | 'reject' | null), not a
+  // boolean: the screen renders both buttons, and one flag would spin
+  // whichever was pressed *and* the other one.
+  const [pendingDecision, setPendingDecision] = useState(null)
   const [error, setError] = useState(null)
 
   useEffect(() => {
@@ -36,7 +40,8 @@ export function useDocumentReview(filename) {
         if (!ignore) setReview(data)
       })
       .catch((requestError) => {
-        if (!ignore) setError(extractErrorMessage(requestError, 'Could not load this document for review.'))
+        if (!ignore)
+          setError(extractErrorMessage(requestError, 'Could not load this document for review.'))
       })
       .finally(() => {
         if (!ignore) setIsLoading(false)
@@ -45,11 +50,12 @@ export function useDocumentReview(filename) {
     return () => {
       ignore = true
     }
-    // `isLoading` starts true and is only ever turned off here, which
-    // is correct as long as one instance of this hook loads one
-    // document — App mounts the review screen keyed by filename, so a
-    // different document is a fresh mount with fresh state rather than
-    // a refetch into a hook that thinks it has already finished.
+    // `isLoading` starts true and is only ever turned off here, which is
+    // correct as long as one instance of this hook loads one document.
+    // App's review route mounts the screen keyed by filename for exactly
+    // that reason, so switching documents is a fresh mount with fresh
+    // state rather than a refetch into a hook that thinks it has already
+    // finished.
   }, [filename])
 
   /**
@@ -75,7 +81,34 @@ export function useDocumentReview(filename) {
     [filename],
   )
 
+  /**
+   * Records an approve/reject verdict on the fields as they currently
+   * stand, and returns whether it worked — same contract as `save`.
+   *
+   * Separate from `save` because it is a separate backend action, not a
+   * save with an empty payload: the correction endpoint refuses an empty
+   * body, and conflating the two would make "I checked this and it's
+   * fine" indistinguishable in the audit trail from "I edited nothing by
+   * accident". See backend/api/routes/review.py.
+   */
+  const decide = useCallback(
+    async (decision) => {
+      setPendingDecision(decision)
+      setError(null)
+      try {
+        setReview(await submitReviewDecision(filename, decision))
+        return true
+      } catch (requestError) {
+        setError(extractErrorMessage(requestError, `Could not ${decision} this document.`))
+        return false
+      } finally {
+        setPendingDecision(null)
+      }
+    },
+    [filename],
+  )
+
   const dismissError = useCallback(() => setError(null), [])
 
-  return { review, isLoading, isSaving, error, save, dismissError }
+  return { review, isLoading, isSaving, pendingDecision, error, save, decide, dismissError }
 }

@@ -16,4 +16,5 @@ class DocumentType(str, Enum):
     AADHAAR_CARD = "Aadhaar Card"
     INVOICE = "Invoice"
     MEDICAL_PRESCRIPTION = "Medical Prescription"
+    TEST_REPORT_FORM = "Test Report Form"
     UNKNOWN = "Unknown"

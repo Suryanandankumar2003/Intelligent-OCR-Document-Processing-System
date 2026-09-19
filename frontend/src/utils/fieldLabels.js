@@ -28,6 +28,16 @@ const FIELD_LABELS = {
   doctor_name: 'Doctor Name',
   date: 'Date',
   medicines: 'Medicines',
+  Client_Code: 'Client Code',
+  Client_Name: 'Client Name',
+  AGE: 'Age',
+  Contact_Number: 'Contact Number',
+  DOCTOR_NAME: 'Referring Doctor',
+  TRF_Number: 'TRF Number',
+  TestName: 'Test Name',
+  TestCode: 'Test Code',
+  SampleCollectionDateTime: 'Sample Collection Date/Time',
+  SAMPLE_TYPE: 'Sample Type',
 }
 
 export function humanizeFieldName(key) {

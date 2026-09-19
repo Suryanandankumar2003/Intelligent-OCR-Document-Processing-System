@@ -19,10 +19,12 @@
  *     runs (a malformed review payload, say). Rendering that array
  *     straight into JSX would crash React with "Objects are not valid
  *     as a React child", so the messages are flattened out of it here.
+ *
+ * `extractBlobErrorMessage` at the bottom is the same unpacking for
+ * binary downloads, where the body arrives as a Blob instead of parsed
+ * JSON.
  */
-export function extractErrorMessage(error, fallback = 'Something went wrong.') {
-  const detail = error.response?.data?.detail
-
+function messageFromDetail(detail) {
   if (typeof detail === 'string' && detail) return detail
 
   if (Array.isArray(detail)) {
@@ -30,5 +32,41 @@ export function extractErrorMessage(error, fallback = 'Something went wrong.') {
     if (messages.length > 0) return messages.join('; ')
   }
 
-  return error.message || fallback
+  return null
+}
+
+export function extractErrorMessage(error, fallback = 'Something went wrong.') {
+  return messageFromDetail(error.response?.data?.detail) || error.message || fallback
+}
+
+/**
+ * The same thing, for a request made with `responseType: 'blob'`.
+ *
+ * Axios honours `responseType` for *every* response, not just successful
+ * ones, so a failing binary download hands back a `{ detail: "..." }`
+ * body that has already been wrapped in a Blob. `error.response.data.detail`
+ * on it is `undefined` — the JSON is real, it's just unparsed — which is
+ * exactly how a perfectly clear backend error message turns into a
+ * useless generic one. Reading the Blob's text and parsing it recovers
+ * the message the backend actually sent.
+ *
+ * Async for the same reason: `Blob.text()` is a promise, and there is no
+ * synchronous way to read one. Callers await it.
+ */
+export async function extractBlobErrorMessage(error, fallback = 'Something went wrong.') {
+  const data = error.response?.data
+
+  if (data instanceof Blob) {
+    try {
+      const message = messageFromDetail(JSON.parse(await data.text())?.detail)
+      if (message) return message
+    } catch {
+      // Not JSON at all (an HTML error page from a proxy, an empty
+      // body): nothing to recover, so fall through to the generic
+      // handling below rather than surfacing a parse error the user
+      // can do nothing with.
+    }
+  }
+
+  return extractErrorMessage(error, fallback)
 }

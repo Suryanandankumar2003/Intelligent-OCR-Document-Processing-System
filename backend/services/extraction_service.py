@@ -49,6 +49,7 @@ from schemas.extraction import (
     InvoiceFields,
     PANCardFields,
     PrescriptionFields,
+    TestReportFormFields,
 )
 from services.prompts.extraction_prompt import build_extraction_prompt, get_extraction_schema
 
@@ -68,6 +69,7 @@ EXTRACTION_MODEL_BY_TYPE = {
     DocumentType.AADHAAR_CARD: AadhaarCardFields,
     DocumentType.INVOICE: InvoiceFields,
     DocumentType.MEDICAL_PRESCRIPTION: PrescriptionFields,
+    DocumentType.TEST_REPORT_FORM: TestReportFormFields,
 }
 
 

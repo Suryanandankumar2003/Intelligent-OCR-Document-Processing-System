@@ -1,67 +1,61 @@
 /**
- * Application shell: a header with the product name/subtitle, a
- * top-level tab between the two things this app does — process a
- * document, or look at how the pipeline is performing — and whichever
- * screen that tab selects.
+ * The route table, wrapped in the application shell.
  *
- * Still one piece of state per level rather than a router (see the
- * reasoning this comment used to carry when there were only two
- * screens): nothing here needs to be linkable or survive a reload yet.
- * `activeTab` picks between "process" and "analytics"; `reviewing` is a
- * second, independent piece of state nested *inside* the process tab —
- * reviewing a document is a detail view within "process a document",
- * not a sibling of it, so switching to the Analytics tab and back
- * doesn't lose your place in a review.
+ * Routing, not tab state. The screens used to be picked by two pieces of
+ * `useState` here (`activeTab`, plus a nested `reviewing` holding the
+ * filename handed over by the upload page), which meant a review screen
+ * existed only as long as that state did: no URL to bookmark, nothing to
+ * reload, and no way to reach a document processed yesterday. Each screen
+ * is now a route, so a document's review screen is addressable by
+ * `/documents/{filename}/review` and survives a refresh, and no screen
+ * depends on another screen's state to be reachable.
+ *
+ * Route table:
+ *   /                            upload + process a document
+ *   /documents                   the persistent, searchable document list
+ *   /documents/:filename/review  review one document, standalone
+ *   /analytics                   pipeline health dashboard
+ *
+ * The chrome around all four — sidebar, navbar, theme control — lives in
+ * `AppLayout`, which wraps the whole `<Routes>` rather than each screen.
+ * That's what keeps the sidebar from remounting (and the mobile drawer
+ * from slamming shut) on every navigation.
  */
-import { useState } from 'react'
+import { Navigate, Route, Routes, useParams } from 'react-router-dom'
+import AppLayout from './components/layout/AppLayout'
 import AnalyticsPage from './pages/AnalyticsPage'
+import DocumentsPage from './pages/DocumentsPage'
 import ReviewPage from './pages/ReviewPage'
 import UploadPage from './pages/UploadPage'
-import './App.css'
 
-const TABS = [
-  { key: 'process', label: 'Process Documents' },
-  { key: 'analytics', label: 'Analytics' },
-]
+/**
+ * Mounts the review screen keyed by the document it's reviewing.
+ *
+ * Two review URLs are the same route, so React would otherwise keep one
+ * mounted across a switch from one document to another — and
+ * `useDocumentReview`'s loading state is per-document (it flips to
+ * "loaded" once and stays there). Keying makes each document a fresh
+ * mount, which is the same guarantee App used to give when it held the
+ * reviewed filename in state.
+ */
+function ReviewRoute() {
+  const { filename } = useParams()
+  return <ReviewPage key={filename} />
+}
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('process')
-  const [reviewing, setReviewing] = useState(null)
-
   return (
-    <div className="app">
-      <header className="app__header">
-        <h1>Intelligent OCR Document Processing</h1>
-        <p className="app__subtitle">
-          Upload a PAN card, Aadhaar card, invoice, or prescription to extract and classify its contents
-        </p>
-        <nav className="app__nav" aria-label="Main">
-          {TABS.map((tab) => (
-            <button
-              key={tab.key}
-              type="button"
-              className={`app__nav-tab${activeTab === tab.key ? ' app__nav-tab--active' : ''}`}
-              onClick={() => setActiveTab(tab.key)}
-            >
-              {tab.label}
-            </button>
-          ))}
-        </nav>
-      </header>
-      <main className="app__main">
-        {activeTab === 'analytics' ? (
-          <AnalyticsPage />
-        ) : reviewing ? (
-          <ReviewPage
-            key={reviewing.filename}
-            filename={reviewing.filename}
-            ocrText={reviewing.ocrText}
-            onBack={() => setReviewing(null)}
-          />
-        ) : (
-          <UploadPage onReview={(filename, ocrText) => setReviewing({ filename, ocrText })} />
-        )}
-      </main>
-    </div>
+    <AppLayout>
+      <Routes>
+        <Route path="/" element={<UploadPage />} />
+        <Route path="/documents" element={<DocumentsPage />} />
+        <Route path="/documents/:filename/review" element={<ReviewRoute />} />
+        <Route path="/analytics" element={<AnalyticsPage />} />
+        {/* A mistyped or stale URL lands on the upload screen rather
+            than a blank page. `replace` keeps the bad URL out of
+            history, so Back doesn't bounce straight back into it. */}
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </AppLayout>
   )
 }

@@ -153,10 +153,75 @@ def save_extraction_result(
     return _commit(db, document)
 
 
+def save_ocr_text(db: Session, *, filename: str, ocr_text: str) -> Optional[Document]:
+    """
+    Persist the OCR transcript for `filename`, called by every route that
+    runs OCR (the OCR, classification, and extraction endpoints all do).
+
+    Returns `None` — rather than creating a row — when no record exists
+    for the filename, unlike `save_extraction_result` below. A transcript
+    is a fact *about* a stored document; if there is no document record to
+    attach it to, there is nothing worth inventing a row to hold. This is
+    also why the write never raises: like a processing event, losing a
+    transcript should not turn a successful OCR response into a 500 (the
+    caller already has the text in that response).
+    """
+    document = get_document_by_filename(db, filename)
+    if document is None:
+        logger.warning("No document record for %r; not saving its OCR text", filename)
+        return None
+
+    document.ocr_text = ocr_text
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception("Failed to save OCR text for Document(filename=%r) — dropping it", filename)
+        return None
+    db.refresh(document)
+    return document
+
+
+def save_classification_result(
+    db: Session, *, filename: str, document_type: DocumentType
+) -> Optional[Document]:
+    """
+    Persist a classification result for `filename`.
+
+    Same "telemetry-ish" contract as `save_ocr_text` above — no row
+    created, failures logged rather than raised — for the same reason: the
+    classification is already in the response the caller received, and a
+    classification that fails to persist should not fail the request.
+
+    Recording it matters most for the case that motivated it: a document
+    the classifier answers `Unknown` for never reaches extraction, so
+    without this write nothing would ever record that the document *was*
+    classified at all. Extraction still overwrites this later via
+    `save_extraction_result` — including when a human overrides the
+    classifier by passing an explicit `document_type`, which is why that
+    write, not this one, is the last word on a document's type.
+    """
+    document = get_document_by_filename(db, filename)
+    if document is None:
+        logger.warning("No document record for %r; not saving its classification", filename)
+        return None
+
+    document.document_type = document_type
+    try:
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        logger.exception("Failed to save classification for Document(filename=%r) — dropping it", filename)
+        return None
+    db.refresh(document)
+    return document
+
+
 def iter_documents_for_export(
     db: Session,
     *,
     document_type: Optional[DocumentType] = None,
+    review_status: Optional[ReviewStatus] = None,
     uploaded_from: Optional[datetime] = None,
     uploaded_to: Optional[datetime] = None,
     batch_size: int = 1000,
@@ -179,12 +244,20 @@ def iter_documents_for_export(
     one column guaranteed unique — paging on a timestamp that two
     documents could share risks silently skipping or repeating a row at
     a batch boundary.
+
+    Every filter here is a `WHERE` clause, so a narrow export reads only
+    the rows it will actually write. Free-text search is the one filter
+    that deliberately isn't offered at this level — see
+    `services.export_service.iter_matching_search` for why it can't be
+    expressed as SQL without changing what "matches" means.
     """
     last_seen_id = 0
     while True:
         stmt = select(Document).where(Document.id > last_seen_id).order_by(Document.id.asc()).limit(batch_size)
         if document_type is not None:
             stmt = stmt.where(Document.document_type == document_type)
+        if review_status is not None:
+            stmt = stmt.where(Document.review_status == review_status)
         if uploaded_from is not None:
             stmt = stmt.where(Document.uploaded_at >= uploaded_from)
         if uploaded_to is not None:
@@ -248,6 +321,28 @@ def save_review(
             )
         )
 
+    return _commit(db, document)
+
+
+def save_review_decision(db: Session, *, document: Document, review_status: ReviewStatus) -> Document:
+    """
+    Record a reviewer's verdict on a document without changing its data.
+
+    The companion to `save_review` above, and deliberately a separate
+    function rather than an optional argument on it. `save_review` exists
+    to persist *corrections* — its whole reason for building its own
+    transaction is to keep `reviewed_data` and the audit rows atomic. A
+    decision writes neither: it touches `review_status` and `reviewed_at`
+    and nothing else, so a document approved without edits keeps
+    `reviewed_data` as `None` and a rejected one keeps every correction
+    anyone made before the rejection.
+
+    That last property is what makes a decision reversible: nothing here
+    is destructive, so approving a rejected document (or the reverse) is
+    just another call with a different status.
+    """
+    document.review_status = review_status
+    document.reviewed_at = datetime.now(timezone.utc)
     return _commit(db, document)
 
 

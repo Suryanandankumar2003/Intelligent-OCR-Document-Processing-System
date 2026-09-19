@@ -10,40 +10,55 @@
  * are both already on every single bar, so a legend restating "blue =
  * PAN Card" under a bar already labeled "PAN Card" would be redundant).
  *
- * Value labels sit above every bar rather than only on hover — the
- * palette's aqua and yellow slots fall below the 3:1 contrast floor
- * against the chart surface (see `frontend/src/index.css`'s chart
- * palette comment), and an always-visible label is exactly the "relief"
- * the dataviz skill requires when a color can't carry a value on its
- * own.
+ * Value labels sit above every bar rather than only on hover — some
+ * palette slots fall below the 3:1 contrast floor against the chart
+ * surface, and an always-visible label is exactly the "relief" the
+ * dataviz skill requires when a color can't carry a value on its own.
+ *
+ * Still hand-drawn SVG rather than an MUI chart component: the hues come
+ * from the `--chart-*` custom properties the theme publishes (see
+ * theme/GlobalStyles.jsx), which is what keeps a document type the same
+ * color here, on the type badges, and in both color modes.
  */
 import { computeYAxis } from '../../utils/chartAxis'
 import { useHoverTooltip } from '../../hooks/useHoverTooltip'
+import EmptyState from '../common/EmptyState'
+import BarChartIcon from '@mui/icons-material/BarChart'
+import ChartCard from './ChartCard'
 import ChartTooltip from './ChartTooltip'
-import './DocumentsByTypeChart.css'
 
 const COLOR_BY_TYPE = {
   'PAN Card': 'var(--chart-pan)',
   'Aadhaar Card': 'var(--chart-aadhaar)',
   Invoice: 'var(--chart-invoice)',
   'Medical Prescription': 'var(--chart-prescription)',
+  'Test Report Form': 'var(--chart-trf)',
   Unknown: 'var(--chart-unknown)',
 }
 
 const VIEW_WIDTH = 560
 const VIEW_HEIGHT = 280
-const MARGIN = { top: 28, right: 16, bottom: 40, left: 40 }
-const MAX_BAR_WIDTH = 24
+const MARGIN = { top: 28, right: 16, bottom: 44, left: 40 }
+const MAX_BAR_WIDTH = 28
+
+/** "Medical Prescription" -> ["Medical", "Prescription"], one word per `<tspan>` line, so a two-word category label doesn't overflow its band at this chart's width. */
+function wordsOf(documentType) {
+  return documentType.split(' ')
+}
 
 export default function DocumentsByTypeChart({ data }) {
   const { containerRef, tooltip, showTooltip, hideTooltip } = useHoverTooltip()
 
   if (data.length === 0) {
     return (
-      <div className="chart-card">
-        <h3 className="chart-card__title">Documents by type</h3>
-        <p className="chart-card__empty">No documents yet.</p>
-      </div>
+      <ChartCard title="Documents by type">
+        <EmptyState
+          dense
+          icon={BarChartIcon}
+          title="No documents yet"
+          description="Once documents are processed, their type breakdown appears here."
+        />
+      </ChartCard>
     )
   }
 
@@ -58,8 +73,7 @@ export default function DocumentsByTypeChart({ data }) {
   const yFor = (count) => plotHeight - (count / axisMax) * plotHeight
 
   return (
-    <div className="chart-card" ref={containerRef}>
-      <h3 className="chart-card__title">Documents by type</h3>
+    <ChartCard title="Documents by type" containerRef={containerRef}>
       <svg
         className="chart-svg"
         viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
@@ -79,13 +93,26 @@ export default function DocumentsByTypeChart({ data }) {
                 stroke="var(--chart-grid)"
                 strokeWidth={1}
               />
-              <text x={-10} y={yFor(tick)} textAnchor="end" dominantBaseline="middle" className="chart-svg__tick">
+              <text
+                x={-10}
+                y={yFor(tick)}
+                textAnchor="end"
+                dominantBaseline="middle"
+                className="chart-svg__tick"
+              >
                 {tick.toLocaleString()}
               </text>
             </g>
           ))}
           <line x1={0} x2={0} y1={0} y2={plotHeight} stroke="var(--chart-axis)" strokeWidth={1} />
-          <line x1={0} x2={plotWidth} y1={plotHeight} y2={plotHeight} stroke="var(--chart-axis)" strokeWidth={1} />
+          <line
+            x1={0}
+            x2={plotWidth}
+            y1={plotHeight}
+            y2={plotHeight}
+            stroke="var(--chart-axis)"
+            strokeWidth={1}
+          />
 
           {data.map((row, index) => {
             const bandStart = index * bandWidth
@@ -113,16 +140,34 @@ export default function DocumentsByTypeChart({ data }) {
                   className="chart-bar"
                   onPointerMove={(event) => showTooltip(event, tooltipContent)}
                   onPointerLeave={hideTooltip}
+                  // Focusable so the reading is reachable without a
+                  // pointer — the tooltip is the only place the exact
+                  // count-per-type is given for a bar whose value label
+                  // is rounded.
                   tabIndex={0}
                   onFocus={(event) => showTooltip(event, tooltipContent)}
                   onBlur={hideTooltip}
                 />
-                <text x={bandStart + bandWidth / 2} y={barY - 8} textAnchor="middle" className="chart-svg__value-label">
+                <text
+                  x={bandStart + bandWidth / 2}
+                  y={barY - 8}
+                  textAnchor="middle"
+                  className="chart-svg__value-label"
+                >
                   {row.count.toLocaleString()}
                 </text>
-                <text x={bandStart + bandWidth / 2} y={plotHeight + 20} textAnchor="middle" className="chart-svg__category-label">
+                <text
+                  x={bandStart + bandWidth / 2}
+                  y={plotHeight + 20}
+                  textAnchor="middle"
+                  className="chart-svg__category-label"
+                >
                   {wordsOf(row.document_type).map((word, lineIndex) => (
-                    <tspan key={word} x={bandStart + bandWidth / 2} dy={lineIndex === 0 ? 0 : '1.1em'}>
+                    <tspan
+                      key={word}
+                      x={bandStart + bandWidth / 2}
+                      dy={lineIndex === 0 ? 0 : '1.1em'}
+                    >
                       {word}
                     </tspan>
                   ))}
@@ -133,11 +178,6 @@ export default function DocumentsByTypeChart({ data }) {
         </g>
       </svg>
       <ChartTooltip tooltip={tooltip} />
-    </div>
+    </ChartCard>
   )
-}
-
-/** "Medical Prescription" -> ["Medical", "Prescription"], one word per `<tspan>` line, so a two-word category label doesn't overflow its band at this chart's width. */
-function wordsOf(documentType) {
-  return documentType.split(' ')
 }

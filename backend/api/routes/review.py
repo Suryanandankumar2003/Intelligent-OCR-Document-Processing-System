@@ -5,8 +5,9 @@ Human-review endpoints — the correction half of the extraction workflow.
 endpoints let a person read it, fix what's wrong, and have both the fix
 and what it replaced recorded:
 
-  GET   /documents/{filename}/review  — current state + correction history
-  PATCH /documents/{filename}/review  — save corrections
+  GET   /documents/{filename}/review           — current state + correction history
+  PATCH /documents/{filename}/review           — save corrections
+  POST  /documents/{filename}/review/decision  — approve or reject, no data change
 
 PATCH rather than PUT, and a partial `corrected_fields` body rather than
 a whole document: a review is by nature "these three fields were wrong",
@@ -24,10 +25,17 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from core.exceptions import DocumentNotYetExtractedError
+from core.review_status import ReviewStatus
 from database import crud
 from database.models import Document, FieldCorrection
 from database.session import get_db
-from schemas.review import DocumentReviewResponse, DocumentReviewUpdate, FieldCorrectionRecord
+from schemas.review import (
+    DocumentReviewDecision,
+    DocumentReviewResponse,
+    DocumentReviewUpdate,
+    FieldCorrectionRecord,
+    ReviewDecision,
+)
 from services.review_service import apply_corrections
 
 router = APIRouter(prefix="/documents", tags=["Review"])
@@ -65,6 +73,10 @@ def _build_review_response(
         # reviewed yet, so the client always has a populated field set to
         # render and never needs a "which one do I show?" branch.
         reviewed_data=document.reviewed_data or document.extracted_data or {},
+        # Stored at OCR time, so the review screen can show the transcript
+        # on a cold load instead of only when the reviewer arrived straight
+        # from the pipeline that produced it.
+        ocr_text=document.ocr_text,
         review_status=document.review_status,
         reviewed_at=document.reviewed_at,
         corrections=[FieldCorrectionRecord.model_validate(correction) for correction in corrections],
@@ -121,4 +133,59 @@ def update_document_review(
         db, document=document, reviewed_data=reviewed_data, corrections=correction_records
     )
 
+    return _build_review_response(document, crud.list_field_corrections(db, document.id))
+
+
+# The only place the client's vocabulary ("approve"/"reject") is
+# translated into the stored workflow state. Kept as a dict at module
+# level rather than an if/elif in the handler so that adding a third
+# verdict later is one line here plus one enum member, with no branch to
+# forget — and so exhaustiveness is visible at a glance.
+_STATUS_BY_DECISION = {
+    ReviewDecision.APPROVE: ReviewStatus.REVIEWED,
+    ReviewDecision.REJECT: ReviewStatus.REJECTED,
+}
+
+
+@router.post(
+    "/{filename}/review/decision",
+    response_model=DocumentReviewResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Approve or reject a document's extracted fields without changing them",
+)
+def decide_document_review(
+    filename: str,
+    payload: DocumentReviewDecision,
+    db: Session = Depends(get_db),
+) -> DocumentReviewResponse:
+    """
+    Record a verdict on the field set exactly as it currently stands.
+
+    The action PATCH above cannot express. That endpoint is for
+    *corrections* and refuses an empty body on purpose, which leaves the
+    two most common review outcomes — "the model got this right, sign it
+    off" and "this extraction is unusable" — with no way to be recorded.
+    This is that way.
+
+    Deliberately writes no `reviewed_data` and logs no `FieldCorrection`
+    rows: nothing about the document's data changed, and inventing audit
+    entries that say a field was "corrected" to the value it already had
+    would make the trail say something untrue. The verdict itself lives
+    in `review_status`/`reviewed_at` alone (see
+    `database.crud.save_review_decision`).
+
+    POST rather than PATCH because this doesn't patch anything — it
+    submits a decision about the resource. Not idempotent-by-accident
+    either: re-approving an already-approved document is harmless but
+    does move `reviewed_at`, which is correct, since a second reviewer
+    signing off is a real event with a real time.
+
+    Returns the same full review state every other endpoint in this
+    module returns, so a client renders the result of a decision through
+    exactly the path it already uses for a load or a save.
+    """
+    document = _get_reviewable_document(db, filename)
+    document = crud.save_review_decision(
+        db, document=document, review_status=_STATUS_BY_DECISION[payload.decision]
+    )
     return _build_review_response(document, crud.list_field_corrections(db, document.id))

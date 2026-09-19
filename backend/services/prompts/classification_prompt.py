@@ -39,6 +39,12 @@ CLASSIFICATION_SYSTEM_PROMPT = (
     '- "Medical Prescription": A prescription written by a doctor. Look '
     'for drug/medicine names, dosage instructions, "Rx", a doctor\'s '
     "name or registration number, or patient diagnosis notes.\n"
+    '- "Test Report Form": A laboratory Test Report Form (TRF) that '
+    "accompanies a specimen sent for diagnostic testing. Look for a "
+    '"TRF" barcode/number, a "Client Code"/"Client Name" pair near the '
+    'top, a "Specimen Type" or "Specimen Collection" checkbox section '
+    "(e.g. Serum, Plasma, WB-EDTA), a referring doctor field, and test "
+    "names/codes for the panel being ordered.\n"
     '- "Unknown": Use this whenever the text does not clearly match any '
     "of the above, or the text is too sparse or garbled to tell.\n\n"
     "Respond with ONLY a single JSON object — no markdown code fences, "

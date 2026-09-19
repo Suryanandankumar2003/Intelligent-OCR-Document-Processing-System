@@ -304,3 +304,67 @@ class ReviewValidationError(ReviewError):
 
     def __init__(self, detail: str) -> None:
         super().__init__(f"Corrected fields are not valid for this document type: {detail}")
+
+
+# --- Batch-processing errors ---------------------------------------------
+#
+# A sixth hierarchy, and like the review family above it has nothing to
+# do with Vertex AI — every member here is a 4xx, because each describes
+# a batch request that is malformed or an operation that doesn't apply to
+# the batch's current state. A *file* failing inside a batch is not an
+# error in this sense at all: it is a recorded outcome on that
+# `batch_files` row (see `core/batch_status.py`), never an exception that
+# reaches HTTP, which is precisely what lets one bad scan in three
+# hundred leave the other 299 untouched.
+
+
+class BatchError(Exception):
+    """Base class for every batch-processing error."""
+
+
+class EmptyBatchError(BatchError):
+    """Raised when a batch upload carries no usable files at all."""
+
+    def __init__(self) -> None:
+        super().__init__("No files were supplied. Add at least one PDF, PNG, or JPG file.")
+
+
+class BatchTooLargeError(BatchError):
+    """Raised when a batch upload exceeds the per-request file-count cap."""
+
+    def __init__(self, supplied: int, maximum: int) -> None:
+        self.supplied = supplied
+        self.maximum = maximum
+        super().__init__(
+            f"This batch has {supplied} files, which is more than the {maximum} allowed in one upload. "
+            f"Split it into smaller batches."
+        )
+
+
+class BatchNotFoundError(BatchError):
+    """Raised when a batch id doesn't match any stored batch."""
+
+    def __init__(self, batch_id: str) -> None:
+        self.batch_id = batch_id
+        super().__init__(f"No batch found with id '{batch_id}'.")
+
+
+class BatchFileNotFoundError(BatchError):
+    """Raised when a file id doesn't belong to the batch it was requested under."""
+
+    def __init__(self, batch_id: str, file_id: int) -> None:
+        super().__init__(f"Batch '{batch_id}' has no file with id {file_id}.")
+
+
+class NothingToRetryError(BatchError):
+    """
+    Raised when a retry request matches no eligible file.
+
+    Deliberately distinct from "batch not found": the caller addressed a
+    real batch, but every file in it either already succeeded or has
+    exhausted `MAX_FILE_RETRIES`. Collapsing the two would make a
+    retry-limit stop look like a missing record.
+    """
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)

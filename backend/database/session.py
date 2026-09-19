@@ -18,6 +18,12 @@ from core.config import get_settings
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# 15 seconds. Comfortably longer than any commit this app makes (each is
+# a handful of small rows), so it only ever absorbs contention rather
+# than masking a genuinely stuck transaction — a write still blocked
+# after 15s is a real bug worth surfacing, not a queue worth joining.
+_BUSY_TIMEOUT_MS = 15_000
+
 engine = create_engine(
     settings.DATABASE_URL,
     # SQLite opens one connection per thread by default and refuses to
@@ -53,6 +59,17 @@ def _set_sqlite_pragmas(dbapi_connection, connection_record) -> None:
       it, a bad reference wouldn't be rejected, it would just be stored.
       Not load-bearing yet (there is only one table), but free insurance
       for the next table that references `documents`.
+    * `busy_timeout` — how long a connection waits for a lock before
+      giving up with "database is locked". SQLite's default is 0: fail
+      instantly. That was survivable while writes only came from HTTP
+      requests, and is not once batch workers exist — WAL allows any
+      number of concurrent readers but still exactly one writer, so
+      several worker threads committing a file's progress at the same
+      moment will contend, routinely, at 100+ files. Waiting is the
+      correct response to that contention: the lock is held for the
+      microseconds of another small commit, not minutes. Without this
+      pragma the first such collision surfaces as a failed file with a
+      baffling error; with it, the write simply happens a moment later.
     * `journal_mode=WAL` — lets readers proceed while a write is in
       progress, instead of SQLite's default behavior where a writer
       blocks every reader (and vice versa) for the duration of the
@@ -64,6 +81,7 @@ def _set_sqlite_pragmas(dbapi_connection, connection_record) -> None:
     cursor = dbapi_connection.cursor()
     cursor.execute("PRAGMA foreign_keys=ON")
     cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute(f"PRAGMA busy_timeout={_BUSY_TIMEOUT_MS}")
     cursor.close()
 
 

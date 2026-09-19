@@ -35,7 +35,10 @@ export function useAnalytics() {
     setIsRefreshing(true)
     setError(null)
     try {
-      const [summaryResult, trendResult] = await Promise.all([getAnalyticsSummary(), getDailyTrend(forDays)])
+      const [summaryResult, trendResult] = await Promise.all([
+        getAnalyticsSummary(),
+        getDailyTrend(forDays),
+      ])
       setSummary(summaryResult)
       setTrend(trendResult)
     } catch (requestError) {
