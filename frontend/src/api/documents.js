@@ -208,3 +208,19 @@ export async function saveDocumentReview(filename, correctedFields) {
   })
   return response.data
 }
+
+/**
+ * The absolute URL of a stored document's original file (see
+ * backend/api/routes/documents.py's `get_document_file`).
+ *
+ * A URL rather than a request, for the same reason `batchStreamUrl` is:
+ * the consumer is an `<img>` or an `<iframe>`, which fetches on its own
+ * and cannot be handed an Axios response. Composing it from
+ * `apiClient`'s baseURL is what keeps it pointing at the same backend as
+ * every other call, including when `VITE_API_BASE_URL` overrides it —
+ * a relative URL here would resolve against Vite's dev server instead.
+ */
+export function documentFileUrl(filename) {
+  const base = apiClient.defaults.baseURL.replace(/\/$/, '')
+  return `${base}/documents/${encodeURIComponent(filename)}/file`
+}

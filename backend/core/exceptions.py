@@ -7,6 +7,7 @@ framework-agnostic (it doesn't need to know about HTTP status codes).
 `register_exception_handlers`, keeping error-response shape consistent
 across every endpoint that reuses these services.
 """
+from typing import Sequence
 
 
 class DocumentUploadError(Exception):
@@ -323,10 +324,42 @@ class BatchError(Exception):
 
 
 class EmptyBatchError(BatchError):
-    """Raised when a batch upload carries no usable files at all."""
+    """
+    Raised when a batch upload leaves nothing to process.
 
-    def __init__(self) -> None:
-        super().__init__("No files were supplied. Add at least one PDF, PNG, or JPG file.")
+    Two different situations reach this, and they need different
+    sentences. An empty request is a client bug — "add some files". A
+    request whose files were *all* rejected is a user who is looking at
+    the files they just chose being told nothing was supplied, which
+    reads as the upload being broken. That case gets the reasons, because
+    the reasons are the only thing that tells them what to do next.
+
+    `rejected` is a sequence of `(filename, reason)` pairs. At most three
+    are named: the point is to show the *kind* of problem, and a 400-file
+    mis-drop should not answer with a 400-line error.
+    """
+
+    #: How many individual rejections to name before summarising.
+    _MAX_NAMED = 3
+
+    def __init__(self, rejected: "Sequence[tuple[str, str]] | None" = None) -> None:
+        self.rejected = list(rejected or [])
+
+        if not self.rejected:
+            super().__init__("No files were supplied. Add at least one PDF, PNG, or JPG file.")
+            return
+
+        named = self.rejected[: self._MAX_NAMED]
+        details = "; ".join(f"'{filename}': {reason}" for filename, reason in named)
+        remainder = len(self.rejected) - len(named)
+        if remainder > 0:
+            details += f"; and {remainder} more"
+
+        count = len(self.rejected)
+        super().__init__(
+            f"None of the {count} file{'' if count == 1 else 's'} could be accepted. "
+            f"{details}."
+        )
 
 
 class BatchTooLargeError(BatchError):

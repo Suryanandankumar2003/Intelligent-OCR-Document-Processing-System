@@ -44,15 +44,13 @@ import MenuIcon from '@mui/icons-material/Menu'
 import DocumentScannerIcon from '@mui/icons-material/DocumentScanner'
 import { useLocation } from 'react-router-dom'
 import SidebarNav from './SidebarNav'
-import { NAV_ITEMS, SIDEBAR_WIDTH } from './navItems'
+import { NAV_ITEMS, SIDEBAR_WIDTH, matchesNavItem } from './navItems'
 import ColorModeToggle from './ColorModeToggle'
 
 /** The label for whichever nav item owns the current URL, for the navbar's title. */
 function useCurrentSectionLabel() {
   const { pathname } = useLocation()
-  const match = NAV_ITEMS.filter((item) =>
-    item.end ? pathname === item.to : pathname.startsWith(item.to),
-  )
+  const match = NAV_ITEMS.filter((item) => matchesNavItem(item, pathname))
   // Longest matching path wins, so /documents/x/review resolves to the
   // Documents section rather than to whichever item happens to be first.
   return match.sort((a, b) => b.to.length - a.to.length)[0]?.label ?? 'Documents'

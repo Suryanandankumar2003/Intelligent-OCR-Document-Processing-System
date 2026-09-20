@@ -1,20 +1,36 @@
 /**
- * The processing screen: pick a file, upload & process it, see the
- * results, and link on to the review screen to correct them. Owns
- * exactly two pieces of state:
+ * The processing screen: the two ways to put documents into the system,
+ * side by side — one document on the left, a batch of them on the right.
  *
- *   1. `selectedFile` — the File object the user picked, before
- *      anything has been sent anywhere.
- *   2. `useDocumentPipeline()` — everything about the in-flight/finished
- *      upload -> OCR -> classify -> extract chain (see
- *      src/hooks/useDocumentPipeline.js for why that's a separate hook
- *      rather than inlined here).
+ * --- Why they share a screen -----------------------------------------
  *
- * Every component below this one is presentation-only — FileSelect,
- * PipelineSteps, ErrorBanner, and ResultsPanel all take plain props and
- * hold no pipeline state of their own. This is the only component that
- * decides *when* things happen; the rest just render whatever they're
- * told.
+ * Because they are the same decision, not two features. Someone arriving
+ * with work to do is choosing between "I have this one scan" and "I have
+ * this folder", and that choice is easier to make when both options are
+ * visible at once than when one of them is behind a different sidebar
+ * entry they have to know exists. The batch *history* is still its own
+ * screen (`/batches`), because reviewing what happened is a different
+ * task from starting something new — the panel on the right links to it.
+ *
+ * --- Layout ----------------------------------------------------------
+ *
+ * Two equal columns from `lg` up, stacked below it, with the single-file
+ * column first in the DOM so a narrow screen and a screen reader both get
+ * the simpler option first.
+ *
+ * The single-document *results* deliberately break out of the column and
+ * render full width underneath. A results panel carrying a transcript and
+ * a field table is unreadable at half width, and by the time it exists
+ * the two-column choice has already been made — so the layout stops
+ * paying for it.
+ *
+ * --- State -----------------------------------------------------------
+ *
+ * The left column owns `selectedFile` plus `useDocumentPipeline()`; the
+ * right column owns its own upload state inside `BatchUploadPanel`. The
+ * two never interact, which is what lets someone kick off a 300-file
+ * batch and then carry on processing a single urgent document while it
+ * runs.
  *
  * The snackbars here are outcome notices only ("Extracted 6 fields",
  * "Processing failed"). The failure *reason* still renders inline where
@@ -22,24 +38,36 @@
  * it — see `components/ErrorBanner.jsx`.
  */
 import { useEffect, useRef, useState } from 'react'
-import { Link as RouterLink } from 'react-router-dom'
-import { Box, Button, Card, CardContent, CircularProgress, Stack, Typography } from '@mui/material'
+import { Link as RouterLink, useNavigate } from 'react-router-dom'
+import {
+  Box,
+  Button,
+  Card,
+  CardContent,
+  CircularProgress,
+  Stack,
+  Typography,
+} from '@mui/material'
 import PlayArrowIcon from '@mui/icons-material/PlayArrow'
 import RestartAltIcon from '@mui/icons-material/RestartAlt'
 import FactCheckIcon from '@mui/icons-material/FactCheck'
+import HistoryIcon from '@mui/icons-material/History'
 import PageHeader from '../components/common/PageHeader'
 import FileSelect from '../components/FileSelect'
 import PipelineSteps from '../components/PipelineSteps'
 import ErrorBanner from '../components/ErrorBanner'
 import ResultsPanel from '../components/ResultsPanel'
 import UnsupportedDocumentPanel from '../components/UnsupportedDocumentPanel'
+import BatchUploadPanel from '../components/batch/BatchUploadPanel'
 import { useNotify } from '../components/feedback/snackbarContext'
 import { useDocumentPipeline, STAGES } from '../hooks/useDocumentPipeline'
+import { formatFileCount } from '../utils/batchStatus'
 
 export default function UploadPage() {
   const [selectedFile, setSelectedFile] = useState(null)
   const pipeline = useDocumentPipeline()
   const notify = useNotify()
+  const navigate = useNavigate()
 
   const isProcessing =
     pipeline.stage !== STAGES.IDLE &&
@@ -82,69 +110,123 @@ export default function UploadPage() {
     pipeline.reset()
   }
 
+  /**
+   * A batch has been accepted by the server. Straight to its own page:
+   * it is the only screen with a live progress feed, and it is what
+   * someone who just uploaded 300 files wants to look at.
+   */
+  const handleBatchUploaded = (batch) => {
+    if (batch.rejected.length > 0) {
+      notify.warning(
+        `${batch.total_files} file${batch.total_files === 1 ? '' : 's'} queued — ${batch.rejected.length} skipped. Details on the batch page.`,
+      )
+    } else {
+      notify.success(`${formatFileCount(batch.total_files)} queued for processing.`)
+    }
+    navigate(`/batches/${encodeURIComponent(batch.batch_id)}`, { state: { backTo: '/' } })
+  }
+
   const isFinished = pipeline.stage === STAGES.DONE || pipeline.stage === STAGES.UNSUPPORTED
 
   return (
-    <Box sx={{ maxWidth: 1200, mx: 'auto', py: { xs: 2, md: 3 } }}>
+    <Box sx={{ maxWidth: 1500, mx: 'auto', py: { xs: 2, md: 3 } }}>
       <PageHeader
-        title="Process a document"
-        description="Upload a PAN card, Aadhaar card, invoice, prescription, or test report form. The pipeline transcribes it, identifies its type, and extracts its structured fields."
+        title="Process documents"
+        description="Run one document through the pipeline and see the result immediately, or upload a whole batch and let it process in the background. Both take PAN cards, Aadhaar cards, invoices, prescriptions, and test report forms."
         actions={
-          isFinished ? (
+          <>
             <Button
+              component={RouterLink}
+              to="/batches"
               variant="outlined"
               color="inherit"
-              startIcon={<RestartAltIcon />}
-              onClick={handleReset}
+              startIcon={<HistoryIcon />}
             >
-              Process another
+              Batch history
             </Button>
-          ) : null
+            {isFinished && (
+              <Button
+                variant="outlined"
+                color="inherit"
+                startIcon={<RestartAltIcon />}
+                onClick={handleReset}
+              >
+                Process another
+              </Button>
+            )}
+          </>
         }
       />
 
       <Stack spacing={2.5}>
-        <Card>
-          <CardContent sx={{ p: { xs: 2, sm: 3 } }}>
-            <Typography variant="h4" component="h2" sx={{ mb: 2 }}>
-              1. Choose a document
-            </Typography>
-
-            <FileSelect
-              selectedFile={selectedFile}
-              onFileSelect={handleFileSelect}
-              disabled={isProcessing}
-            />
-
-            <Button
-              variant="contained"
-              size="large"
-              onClick={handleUpload}
-              disabled={!selectedFile || isProcessing}
-              startIcon={
-                isProcessing ? <CircularProgress size={16} color="inherit" /> : <PlayArrowIcon />
-              }
-              sx={{ mt: 2.5 }}
+        <Box
+          sx={{
+            display: 'grid',
+            gap: 2.5,
+            // Equal columns: neither way of working is the "main" one,
+            // and giving one more room would say otherwise.
+            gridTemplateColumns: { xs: '1fr', lg: 'repeat(2, minmax(0, 1fr))' },
+            alignItems: 'stretch',
+          }}
+        >
+          {/* --- Left: one document ------------------------------------ */}
+          <Card sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+            <CardContent
+              sx={{ p: { xs: 2, sm: 3 }, flex: 1, display: 'flex', flexDirection: 'column' }}
             >
-              {isProcessing ? 'Processing…' : 'Upload & process'}
-            </Button>
+              <Typography variant="h4" component="h2" sx={{ mb: 0.5 }}>
+                One document
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                Upload a single file and watch it move through OCR, classification, and
+                extraction. The results appear below.
+              </Typography>
 
-            {pipeline.stage !== STAGES.IDLE && (
-              <Box sx={{ mt: 3 }}>
-                <PipelineSteps stage={pipeline.stage} uploadProgress={pipeline.uploadProgress} />
-              </Box>
-            )}
+              <Stack spacing={2} sx={{ flex: 1 }}>
+                <FileSelect
+                  selectedFile={selectedFile}
+                  onFileSelect={handleFileSelect}
+                  disabled={isProcessing}
+                />
 
-            {pipeline.stage === STAGES.ERROR && (
-              <ErrorBanner
-                message={pipeline.error}
-                title="Processing failed"
-                onDismiss={pipeline.reset}
-                sx={{ mt: 2.5 }}
-              />
-            )}
-          </CardContent>
-        </Card>
+                {pipeline.stage !== STAGES.IDLE && (
+                  <PipelineSteps stage={pipeline.stage} uploadProgress={pipeline.uploadProgress} />
+                )}
+
+                {pipeline.stage === STAGES.ERROR && (
+                  <ErrorBanner
+                    message={pipeline.error}
+                    title="Processing failed"
+                    onDismiss={pipeline.reset}
+                  />
+                )}
+
+                {/* Pinned to the bottom so both columns' primary buttons
+                    sit on the same line despite different content heights. */}
+                <Box sx={{ mt: 'auto', pt: 1 }}>
+                  <Button
+                    variant="contained"
+                    size="large"
+                    onClick={handleUpload}
+                    disabled={!selectedFile || isProcessing}
+                    startIcon={
+                      isProcessing ? (
+                        <CircularProgress size={16} color="inherit" />
+                      ) : (
+                        <PlayArrowIcon />
+                      )
+                    }
+                  >
+                    {isProcessing ? 'Processing…' : 'Upload & process'}
+                  </Button>
+                </Box>
+              </Stack>
+            </CardContent>
+          </Card>
+
+          {/* --- Right: many documents --------------------------------- */}
+          <BatchUploadPanel onUploaded={handleBatchUploaded} />
+        </Box>
 
         {/* An unsupported document isn't an error and isn't a result, so it
             gets neither of their panels. `isExtracting` is read from the
@@ -184,7 +266,7 @@ export default function UploadPage() {
                 >
                   <Box>
                     <Typography variant="h4" component="h2" sx={{ mb: 0.5 }}>
-                      2. Verify the extracted data
+                      Verify the extracted data
                     </Typography>
                     <Typography variant="body2" color="text.secondary">
                       Check each field against the document and correct anything the model got

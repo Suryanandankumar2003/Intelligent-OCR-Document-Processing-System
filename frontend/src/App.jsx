@@ -11,7 +11,9 @@
  * depends on another screen's state to be reachable.
  *
  * Route table:
- *   /                            upload + process a document
+ *   /                            process one document, or start a batch
+ *   /batches                     the batch history
+ *   /batches/:batchId            one batch, watched live
  *   /documents                   the persistent, searchable document list
  *   /documents/:filename/review  review one document, standalone
  *   /analytics                   pipeline health dashboard
@@ -24,6 +26,8 @@
 import { Navigate, Route, Routes, useParams } from 'react-router-dom'
 import AppLayout from './components/layout/AppLayout'
 import AnalyticsPage from './pages/AnalyticsPage'
+import BatchDetailPage from './pages/BatchDetailPage'
+import BatchesPage from './pages/BatchesPage'
 import DocumentsPage from './pages/DocumentsPage'
 import ReviewPage from './pages/ReviewPage'
 import UploadPage from './pages/UploadPage'
@@ -43,11 +47,28 @@ function ReviewRoute() {
   return <ReviewPage key={filename} />
 }
 
+/**
+ * Mounts the batch details screen keyed by the batch it is showing.
+ *
+ * Same reason `ReviewRoute` is keyed: two batch URLs are the same route,
+ * so React would keep one mounted across a switch from one batch to
+ * another — and this screen holds an open SSE connection plus loading
+ * state scoped to a single batch id. Keying makes each batch a fresh
+ * mount, which closes the previous stream instead of leaving it feeding
+ * a screen that has moved on.
+ */
+function BatchDetailRoute() {
+  const { batchId } = useParams()
+  return <BatchDetailPage key={batchId} />
+}
+
 export default function App() {
   return (
     <AppLayout>
       <Routes>
         <Route path="/" element={<UploadPage />} />
+        <Route path="/batches" element={<BatchesPage />} />
+        <Route path="/batches/:batchId" element={<BatchDetailRoute />} />
         <Route path="/documents" element={<DocumentsPage />} />
         <Route path="/documents/:filename/review" element={<ReviewRoute />} />
         <Route path="/analytics" element={<AnalyticsPage />} />

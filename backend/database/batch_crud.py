@@ -33,12 +33,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Iterable, Optional, Sequence
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import and_, case, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from core.batch_status import (
-    ACTIVE_BATCH_STATUSES,
     BatchFileStatus,
     BatchStatus,
     RETRYABLE_FILE_STATUSES,
@@ -347,6 +346,35 @@ def recompute_batch_progress(db: Session, batch_id: str) -> Optional[Batch]:
     *self-healing*: whatever went wrong, the next file to finish restores
     the truth.
 
+    --- Why it is one statement and not a read then a write ------------
+
+    Because two workers finish files at the same moment, and this is the
+    function both of them call. Written as "SELECT the counts, assign
+    them to the ORM object, commit", the two interleave like this:
+
+        A: reads {3 success}      -> status COMPLETED, successful 3
+        B: reads {2 success, 1 pending}, a snapshot taken before A wrote
+        A: commits
+        B: commits                -> successful 2, progress 66.7%
+
+    and because SQLAlchemy emits only the columns *that session* saw
+    change, B's UPDATE can carry the stale counters while leaving A's
+    status untouched — producing a batch that reads "Completed" next to
+    "2 of 3, 66.7%". Nothing recomputes afterwards, because there are no
+    files left to finish, so that contradiction is permanent: the exact
+    opposite of the self-healing claimed above.
+
+    Doing the whole thing as one UPDATE whose values are correlated
+    subqueries closes the gap. The counts are read and written inside a
+    single statement, so a concurrent recompute runs either entirely
+    before it or entirely after it, and whichever runs last is the one
+    that saw every committed file. Every column is also written
+    together, so no mixture of two snapshots can survive.
+
+    This is not a SQLite quirk — it is the ordinary lost-update race,
+    and it is reachable wherever two workers share a batch, which is the
+    normal case for the threads pool this project ships with.
+
     --- The status rules -----------------------------------------------
 
     Derived, never set by hand, so there is one definition of what
@@ -362,52 +390,79 @@ def recompute_batch_progress(db: Session, batch_id: str) -> Optional[Batch]:
     back through `PROCESSING` by exactly these rules, with no special
     case for the transition.
     """
-    batch = db.get(Batch, batch_id)
-    if batch is None:
+    # Existence is still checked up front, so a deleted batch answers
+    # `None` rather than an UPDATE that silently matches no rows.
+    if db.get(Batch, batch_id) is None:
         return None
 
-    counts_stmt = (
-        select(BatchFile.processing_status, func.count())
-        .where(BatchFile.batch_id == batch_id)
-        .group_by(BatchFile.processing_status)
-    )
-    counts = {status: count for status, count in db.execute(counts_stmt).all()}
+    def _count(*conditions):
+        """A correlated scalar subquery counting this batch's files."""
+        return (
+            select(func.count())
+            .select_from(BatchFile)
+            .where(BatchFile.batch_id == batch_id, *conditions)
+            .scalar_subquery()
+        )
 
-    total = sum(counts.values())
-    successful = counts.get(BatchFileStatus.SUCCESS, 0)
-    failed = counts.get(BatchFileStatus.FAILED, 0)
-    processing = counts.get(BatchFileStatus.PROCESSING, 0)
-    pending = counts.get(BatchFileStatus.PENDING, 0)
+    total = _count()
+    successful = _count(BatchFile.processing_status == BatchFileStatus.SUCCESS)
+    failed = _count(BatchFile.processing_status == BatchFileStatus.FAILED)
+    processing = _count(BatchFile.processing_status == BatchFileStatus.PROCESSING)
+    pending = _count(BatchFile.processing_status == BatchFileStatus.PENDING)
     processed = successful + failed
+    outstanding = pending + processing
 
-    batch.total_files = total
-    batch.processed_files = processed
-    batch.successful_files = successful
-    batch.failed_files = failed
-    # An empty batch reads as 100% rather than dividing by zero. It
-    # cannot occur through the API (`EmptyBatchError` rejects it) but can
-    # if every file row is deleted, and "0 of 0 done" is complete.
-    batch.progress_percentage = round(processed / total * 100, 1) if total else 100.0
-
-    if pending or processing:
+    # The same four rules as before, expressed as a CASE so they are
+    # evaluated against the same snapshot as the counters above. Order
+    # matters, and matches the prose in the docstring.
+    status = case(
         # `PENDING` only while genuinely untouched, so the list can
         # distinguish "queued, waiting for a worker" from "running".
-        batch.status = BatchStatus.PROCESSING if (processed or processing) else BatchStatus.PENDING
-    elif failed == 0:
-        batch.status = BatchStatus.COMPLETED
-    elif successful == 0:
-        batch.status = BatchStatus.FAILED
-    else:
-        batch.status = BatchStatus.PARTIALLY_COMPLETED
+        (and_(outstanding > 0, processed + processing == 0), BatchStatus.PENDING),
+        (outstanding > 0, BatchStatus.PROCESSING),
+        (failed == 0, BatchStatus.COMPLETED),
+        (successful == 0, BatchStatus.FAILED),
+        else_=BatchStatus.PARTIALLY_COMPLETED,
+    )
 
-    if batch.status in ACTIVE_BATCH_STATUSES:
-        # Cleared when a batch reopens, so a retried batch does not keep
-        # claiming it finished at a time before its newest file ran.
-        batch.completed_at = None
-    elif batch.completed_at is None:
-        batch.completed_at = _utcnow()
-
+    db.execute(
+        update(Batch)
+        .where(Batch.id == batch_id)
+        .values(
+            total_files=total,
+            processed_files=processed,
+            successful_files=successful,
+            failed_files=failed,
+            # An empty batch reads as 100% rather than dividing by zero.
+            # It cannot occur through the API (`EmptyBatchError` rejects
+            # it) but can if every file row is deleted, and "0 of 0 done"
+            # is complete.
+            progress_percentage=case(
+                (total == 0, 100.0),
+                else_=func.round(processed * 100.0 / func.nullif(total, 0), 1),
+            ),
+            status=status,
+            completed_at=case(
+                # Cleared when a batch reopens, so a retried batch does
+                # not keep claiming it finished at a time before its
+                # newest file ran.
+                (outstanding > 0, None),
+                # Stamped once: a batch that was already finished keeps
+                # the moment it first finished.
+                (Batch.completed_at.is_(None), _utcnow()),
+                else_=Batch.completed_at,
+            ),
+        )
+        .execution_options(synchronize_session=False)
+    )
     _commit(db)
+
+    # Re-read after the write, because the values the caller wants are
+    # the ones the database computed, not the ones this session happened
+    # to be holding before the UPDATE ran.
+    batch = db.get(Batch, batch_id)
+    if batch is not None:
+        db.refresh(batch)
     return batch
 
 

@@ -20,10 +20,12 @@ import {
   Typography,
 } from '@mui/material'
 import DocumentScannerIcon from '@mui/icons-material/DocumentScanner'
-import { NavLink } from 'react-router-dom'
-import { NAV_ITEMS } from './navItems'
+import { NavLink, useLocation } from 'react-router-dom'
+import { NAV_ITEMS, matchesNavItem } from './navItems'
 
 export default function SidebarNav({ onNavigate }) {
+  const { pathname } = useLocation()
+
   return (
     <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
       <Box sx={{ px: 2.5, py: 2.25, display: 'flex', alignItems: 'center', gap: 1.5 }}>
@@ -61,16 +63,22 @@ export default function SidebarNav({ onNavigate }) {
       </Typography>
 
       <List sx={{ px: 1.5, py: 0.5, flexGrow: 1 }}>
-        {NAV_ITEMS.map(({ to, label, description, icon: Icon, end }) => (
+        {NAV_ITEMS.map((item) => {
+          const { to, label, description, icon: Icon, end } = item
+          // Computed here rather than left to `NavLink`'s own `isActive`,
+          // because an item can own a screen that does not live under its
+          // path (`alsoMatch` — Process owns /batches). `aria-current` is
+          // set from the same answer, so the item announced to assistive
+          // tech is always the one that is tinted.
+          const isActive = matchesNavItem(item, pathname)
+          return (
           <ListItemButton
             key={to}
-            // `NavLink` supplies `aria-current="page"` and the
-            // `isActive` flag; MUI's `selected` prop only styles. Using
-            // both means the active item is announced to assistive tech,
-            // not merely tinted.
             component={NavLink}
             to={to}
             end={end}
+            className={isActive ? 'active' : undefined}
+            aria-current={isActive ? 'page' : undefined}
             onClick={onNavigate}
             sx={{
               borderRadius: 2,
@@ -97,7 +105,8 @@ export default function SidebarNav({ onNavigate }) {
               }}
             />
           </ListItemButton>
-        ))}
+          )
+        })}
       </List>
 
       <Divider />

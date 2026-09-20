@@ -216,7 +216,10 @@ async def stage_batch_files(uploads: Sequence[UploadFile]) -> StagedBatch:
             await upload.close()
 
     if not staged.accepted:
-        raise EmptyBatchError()
+        # Handing over the rejections is what turns "No files were
+        # supplied" — said to someone looking at the five files they just
+        # dropped — into a sentence naming what was wrong with them.
+        raise EmptyBatchError([(item.original_filename, item.reason) for item in staged.rejected])
 
     logger.info(
         "Staged batch upload: %d accepted, %d rejected, %.1f MB total",

@@ -25,23 +25,48 @@
  *
  * Source on the left, fields on the right, decisions across the bottom.
  * That arrangement is the entire job of this screen: checking an
- * extracted value means reading it against the text it came from, and
+ * extracted value means reading it against what it came from, and
  * anything that makes the reviewer scroll between the two — stacking
- * them, or hiding the transcript behind a toggle — turns one glance into
- * a round trip, per field, per document.
+ * them, or hiding the source behind a toggle — turns one glance into a
+ * round trip, per field, per document.
  *
- * Below `lg` the two panes stack (transcript first), because side by
- * side at that width gives neither pane enough room to read. The action
- * bar stays stuck to the bottom in both arrangements.
+ * The left pane holds two views of that source, as tabs: the **original
+ * document** (the scan or PDF itself) and the **OCR text**. The document
+ * is the default, because it is the ground truth — the transcript is
+ * the model's reading of it, and a field is ultimately wrong or right
+ * against the paper, not against another machine output. The transcript
+ * stays one click away because it is searchable and copyable in a way an
+ * image is not.
+ *
+ * Tabs rather than a third column: at three panes none of them is wide
+ * enough to read, and the two source views are alternatives — a
+ * reviewer is looking at one or the other, never both at once.
+ *
+ * Below `lg` the two panes stack (source first), because side by side at
+ * that width gives neither pane enough room to read. The action bar
+ * stays stuck to the bottom in both arrangements.
  *
  * Server state lives in `useDocumentReview` and the edit buffer in
  * `useReviewDraft`; this file decides what to show for each state and
  * wires the three actions together.
  */
+import { useState } from 'react'
 import { Link as RouterLink, useLocation, useNavigate, useParams } from 'react-router-dom'
-import { Box, Breadcrumbs, Button, Card, CardContent, Link, Stack, Typography } from '@mui/material'
+import {
+  Box,
+  Breadcrumbs,
+  Button,
+  Card,
+  CardContent,
+  Link,
+  Stack,
+  Tab,
+  Tabs,
+  Typography,
+} from '@mui/material'
 import ArrowBackIcon from '@mui/icons-material/ArrowBack'
 import CorrectionHistory from '../components/CorrectionHistory'
+import DocumentPreview from '../components/DocumentPreview'
 import DocumentReviewForm from '../components/DocumentReviewForm'
 import DocumentTypeBadge from '../components/DocumentTypeBadge'
 import ErrorBanner from '../components/ErrorBanner'
@@ -152,6 +177,9 @@ function ReviewEditor({ review, isSaving, pendingDecision, onSave, onDecide, bac
 export default function ReviewPage() {
   const { filename } = useParams()
   const location = useLocation()
+  // The document, not the transcript: the scan is the ground truth a
+  // field is checked against. See the file docstring.
+  const [sourceTab, setSourceTab] = useState('document')
   const { ocrText: handedOverOcrText, backTo } = location.state ?? {}
   const { review, isLoading, isSaving, pendingDecision, error, save, decide, dismissError } =
     useDocumentReview(filename)
@@ -264,6 +292,16 @@ export default function ReviewPage() {
               flexDirection: 'column',
             }}
           >
+            <Tabs
+              value={sourceTab}
+              onChange={(_event, next) => setSourceTab(next)}
+              sx={{ px: { xs: 1, sm: 2 }, borderBottom: 1, borderColor: 'divider' }}
+              aria-label="Which view of the source document to show"
+            >
+              <Tab value="document" label="Original document" />
+              <Tab value="text" label="OCR text" />
+            </Tabs>
+
             <CardContent
               sx={{
                 p: { xs: 2, sm: 3 },
@@ -273,25 +311,53 @@ export default function ReviewPage() {
                 flex: 1,
               }}
             >
-              {ocrText ? (
-                <OcrTextPanel
-                  text={ocrText}
-                  title="Original OCR text"
-                  downloadName={`${filename}.txt`}
-                  fill
-                  minHeight={280}
-                />
-              ) : (
-                <>
-                  <Typography variant="h4" component="h3" sx={{ mb: 1 }}>
-                    Original OCR text
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary">
-                    No transcript was stored for this document. It was processed before OCR text
-                    began being saved, so the fields on the right are all that remains of it.
-                  </Typography>
-                </>
-              )}
+              {/* Both panels stay mounted, with the inactive one hidden.
+                  Unmounting would re-download the scan and throw away the
+                  reviewer's zoom every time they glanced at the
+                  transcript and came back — which, on this screen, is the
+                  single most repeated action there is. */}
+              <Box
+                hidden={sourceTab !== 'document'}
+                sx={{
+                  display: sourceTab === 'document' ? 'flex' : 'none',
+                  flexDirection: 'column',
+                  minHeight: 0,
+                  flex: 1,
+                }}
+              >
+                <DocumentPreview filename={filename} fill minHeight={280} />
+              </Box>
+
+              <Box
+                hidden={sourceTab !== 'text'}
+                sx={{
+                  display: sourceTab === 'text' ? 'flex' : 'none',
+                  flexDirection: 'column',
+                  minHeight: 0,
+                  flex: 1,
+                }}
+              >
+                {ocrText ? (
+                  <OcrTextPanel
+                    text={ocrText}
+                    title="Original OCR text"
+                    downloadName={`${filename}.txt`}
+                    fill
+                    minHeight={280}
+                  />
+                ) : (
+                  <>
+                    <Typography variant="h4" component="h3" sx={{ mb: 1 }}>
+                      Original OCR text
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      No transcript was stored for this document. It was processed before OCR text
+                      began being saved — the original document, on the other tab, is still
+                      there.
+                    </Typography>
+                  </>
+                )}
+              </Box>
             </CardContent>
           </Card>
 

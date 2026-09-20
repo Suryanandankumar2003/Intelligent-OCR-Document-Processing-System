@@ -13,6 +13,15 @@
  * the backend (`backend/database/analytics.py`) and every chart's
  * rendering to its own component.
  *
+ * --- The batch section ------------------------------------------------
+ *
+ * Rendered below the document metrics, and only once a batch has
+ * actually been run. An install that only ever processes single
+ * documents would otherwise carry four permanently-empty cards and a
+ * blank chart explaining that nothing has happened — a dashboard should
+ * not spend a third of its height on a feature this operator does not
+ * use. The section appears the moment it has something to say.
+ *
  * The mid-refresh state dims the content rather than replacing it with
  * the skeleton. Skeletons are for a first load, where there is genuinely
  * nothing to show; swapping real numbers for grey boxes every time
@@ -25,12 +34,17 @@ import DescriptionIcon from '@mui/icons-material/Description'
 import TimerIcon from '@mui/icons-material/Timer'
 import TextSnippetIcon from '@mui/icons-material/TextSnippet'
 import DataObjectIcon from '@mui/icons-material/DataObject'
+import LayersIcon from '@mui/icons-material/Layers'
+import TaskAltIcon from '@mui/icons-material/TaskAlt'
+import SpeedIcon from '@mui/icons-material/Speed'
+import ScheduleIcon from '@mui/icons-material/Schedule'
 import ErrorBanner from '../components/ErrorBanner'
 import PageHeader from '../components/common/PageHeader'
 import { AnalyticsSkeleton } from '../components/common/Skeletons'
 import StatCard from '../components/analytics/StatCard'
 import DocumentsByTypeChart from '../components/analytics/DocumentsByTypeChart'
 import DailyTrendChart from '../components/analytics/DailyTrendChart'
+import BatchVolumeChart from '../components/analytics/BatchVolumeChart'
 import StageMetricsTable from '../components/analytics/StageMetricsTable'
 import { useAnalytics } from '../hooks/useAnalytics'
 import { formatCount, formatDurationSeconds, formatPercent } from '../utils/analyticsFormat'
@@ -47,6 +61,8 @@ export default function AnalyticsPage() {
   const {
     summary,
     trend,
+    batchSummary,
+    batchVolume,
     days,
     dayRangePresets,
     setDays,
@@ -193,6 +209,77 @@ export default function AnalyticsPage() {
         </Box>
 
         <StageMetricsTable stageMetrics={summary.stage_metrics} />
+
+        {/* Only once batching has been used at all — see the module
+            docstring. `batchSummary` is null both when nothing has been
+            batched and when that endpoint failed while the rest
+            succeeded, and "don't show the section" is the right answer
+            to both. */}
+        {batchSummary && batchSummary.total_batches > 0 && (
+          <>
+            <Box sx={{ pt: 1 }}>
+              <Typography variant="h3" component="h2" sx={{ mb: 0.5 }}>
+                Batch processing
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Throughput and reliability of bulk runs. Rates are over files that finished —
+                a file still in flight counts towards neither.
+              </Typography>
+            </Box>
+
+            <Box
+              sx={{
+                display: 'grid',
+                gap: 2,
+                gridTemplateColumns: { xs: '1fr', sm: 'repeat(2, 1fr)', lg: 'repeat(4, 1fr)' },
+              }}
+            >
+              <StatCard
+                label="Batches run"
+                value={formatCount(batchSummary.total_batches)}
+                hint={
+                  batchSummary.average_batch_size
+                    ? `${Math.round(batchSummary.average_batch_size).toLocaleString()} files each on average`
+                    : undefined
+                }
+                icon={LayersIcon}
+              />
+              <StatCard
+                label="Files processed in batches"
+                value={formatCount(batchSummary.total_files)}
+                hint={
+                  batchSummary.processing_files > 0
+                    ? `${batchSummary.processing_files.toLocaleString()} still in flight`
+                    : `${batchSummary.failed_files.toLocaleString()} failed`
+                }
+                icon={TaskAltIcon}
+              />
+              <StatCard
+                label="Batch success rate"
+                value={formatPercent(batchSummary.success_rate)}
+                hint={
+                  batchSummary.total_files > 0
+                    ? `${batchSummary.successful_files.toLocaleString()} of ${(batchSummary.successful_files + batchSummary.failed_files).toLocaleString()} finished files`
+                    : undefined
+                }
+                icon={SpeedIcon}
+                tone={rateTone(batchSummary.success_rate)}
+              />
+              <StatCard
+                label="Average batch duration"
+                value={formatDurationSeconds(batchSummary.average_batch_duration_seconds)}
+                hint={
+                  batchSummary.average_file_processing_seconds
+                    ? `${formatDurationSeconds(batchSummary.average_file_processing_seconds)} per file`
+                    : undefined
+                }
+                icon={ScheduleIcon}
+              />
+            </Box>
+
+            {batchVolume && <BatchVolumeChart data={batchVolume.trend} days={batchVolume.days} />}
+          </>
+        )}
       </Stack>
     </Box>
   )

@@ -42,6 +42,10 @@ export default function AppGlobalStyles() {
             '--color-surface': theme.palette.background.paper,
             '--color-primary': theme.palette.primary.main,
             '--color-success': theme.palette.success.main,
+            // Added for the batch volume chart's failure series. Defined
+            // here with the others so a failed file is the same red in a
+            // chart, a status chip, and a progress bar.
+            '--color-error': theme.palette.error.main,
           },
 
           '.chart-svg': {

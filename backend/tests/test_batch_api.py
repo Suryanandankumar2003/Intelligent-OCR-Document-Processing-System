@@ -43,7 +43,19 @@ def _is_terminal(detail):
 
 class TestBatchUpload:
     def test_uploads_many_files_and_returns_immediately(self, client, make_upload, stub_pipeline):
-        stub_pipeline()
+        """
+        The endpoint’s central promise: it answers once the files are
+        stored and the work is queued, not once the work is done.
+
+        The workers are held for the duration, which is what makes that
+        testable. Ungated, the stubbed pipeline finishes a dozen files in
+        less time than it takes to serialise the response, so the batch
+        can legitimately read "Completed" by the time the assertion runs
+        — and the test would be measuring the stub’s speed rather than
+        the endpoint’s behaviour.
+        """
+        stub = stub_pipeline()
+        stub.hold()
 
         response = client.post(
             "/api/v1/batches/upload",
@@ -55,9 +67,15 @@ class TestBatchUpload:
         body = response.json()
         assert body["total_files"] == 12
         assert body["batch_name"] == "Twelve invoices"
+        # Still unfinished, because no file has been allowed to complete
+        # — so this asserts the response did not wait for them.
         assert body["status"] in (BatchStatus.PENDING.value, BatchStatus.PROCESSING.value)
         assert body["rejected"] == []
         assert body["batch_id"]
+
+        stub.release()
+        detail = _wait_for(client, body["batch_id"], predicate=_is_terminal)
+        assert detail["batch"]["successful_files"] == 12
 
     def test_default_name_when_none_supplied(self, client, make_upload, stub_pipeline):
         stub_pipeline()
@@ -427,7 +445,13 @@ class TestExistingFunctionalityUnaffected:
     """
 
     def test_single_upload_endpoint_still_works(self, client, make_upload):
-        response = client.post("/api/v1/upload", files=[make_upload("single.pdf")])
+        # `field="file"` because this is the *single*-file endpoint. The
+        # fixture defaults to the batch endpoint's `files`, which this
+        # route rejects at validation time with a 422 that looks like a
+        # broken upload route rather than a mis-addressed request.
+        response = client.post(
+            "/api/v1/upload", files=[make_upload("single.pdf", field="file")]
+        )
 
         assert response.status_code == 201
         assert response.json()["original_filename"] == "single.pdf"
