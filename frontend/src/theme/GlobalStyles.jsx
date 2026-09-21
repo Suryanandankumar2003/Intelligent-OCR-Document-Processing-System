@@ -46,6 +46,11 @@ export default function AppGlobalStyles() {
             // here with the others so a failed file is the same red in a
             // chart, a status chip, and a progress bar.
             '--color-error': theme.palette.error.main,
+            // The logs error-trend chart's second series. A warning is a
+            // status, not a category, so it takes the theme's status
+            // colour rather than a categorical slot — the same rule that
+            // keeps `--color-error` out of the `--chart-*` family.
+            '--color-warning': theme.palette.warning.main,
           },
 
           '.chart-svg': {
@@ -129,6 +134,78 @@ export default function AppGlobalStyles() {
             fontFamily: MONO_FAMILY,
             fontWeight: 600,
             color: theme.palette.text.primary,
+          },
+
+          // --- PDF.js text layer -------------------------------------
+          //
+          // The invisible, exactly-positioned copy of a PDF page's text
+          // that `components/viewer/PdfPageView.jsx` renders over the
+          // canvas. It is what makes the document selectable and
+          // searchable instead of a flat picture, and what the
+          // highlight search reads.
+          //
+          // These rules are *required*, not decorative: PDF.js positions
+          // every span with `left`/`top` and sizes it in units of
+          // `--total-scale-factor`, and with no stylesheet at all the
+          // whole layer collapses into a pile of visible black text in
+          // the page's top-left corner.
+          //
+          // Written here rather than by importing `pdfjs-dist/web/pdf_viewer.css`
+          // — that file is six thousand lines of full-viewer chrome
+          // (toolbars, sidebars, the annotation editor) for the handful
+          // of rules below, and it styles class names this app never
+          // renders.
+          '.textLayer': {
+            position: 'absolute',
+            inset: 0,
+            overflow: 'clip',
+            textAlign: 'initial',
+            lineHeight: 1,
+            letterSpacing: 'normal',
+            wordSpacing: 'normal',
+            textSizeAdjust: 'none',
+            forcedColorAdjust: 'none',
+            transformOrigin: '0 0',
+            // The text is drawn transparently on top of the canvas that
+            // already shows it, so a selection has to be visible some
+            // other way — this is the caret, and `::selection` below is
+            // the highlight.
+            caretColor: 'CanvasText',
+            zIndex: 0,
+            '--min-font-size': 1,
+            '--text-scale-factor': 'calc(var(--total-scale-factor) * var(--min-font-size))',
+            '--min-font-size-inv': 'calc(1 / var(--min-font-size))',
+          },
+          '.textLayer span, .textLayer br': {
+            color: 'transparent',
+            position: 'absolute',
+            whiteSpace: 'pre',
+            cursor: 'text',
+            transformOrigin: '0% 0%',
+            userSelect: 'text',
+          },
+          // PDF.js writes the per-span metrics as custom properties and
+          // expects the stylesheet to assemble them; these two selectors
+          // are that assembly, and they are why a span ends up the right
+          // size and at the right angle.
+          '.textLayer > :not(.markedContent), .textLayer .markedContent span:not(.markedContent)': {
+            zIndex: 1,
+            '--font-height': 0,
+            fontSize: 'calc(var(--text-scale-factor) * var(--font-height))',
+            '--scale-x': 1,
+            '--rotate': '0deg',
+            transform:
+              'rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv))',
+          },
+          // A structural wrapper with no geometry of its own — it must
+          // not introduce a box, or every span inside it is positioned
+          // against the wrong origin.
+          '.textLayer .markedContent': { display: 'contents' },
+          '.textLayer ::selection': {
+            // Tinted rather than the OS default, which on a white page
+            // under transparent text renders as an opaque block that
+            // hides the very characters being selected.
+            background: `${theme.palette.primary.main}40`,
           },
         }
       }}

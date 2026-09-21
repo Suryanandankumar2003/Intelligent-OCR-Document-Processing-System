@@ -11,6 +11,12 @@ One document at a time, or **500 at once** — a batch upload returns
 immediately and processes in the background on Celery workers, with live
 progress, per-file error reporting, and retries.
 
+Every step of that — every upload, OCR call, classification, extraction,
+review, approval, batch, retry and export — is recorded in a searchable
+**application log** with its own analytics dashboard and Excel export, so
+"what happened to this document?" and "why is this batch stuck?" are
+questions with answers rather than guesses.
+
 Built as a FastAPI backend and a React frontend over Google Cloud's
 Vertex AI (Gemini), with SQLite persistence and Redis as the task broker.
 It runs entirely on a local Windows machine: no Docker, no cloud
@@ -36,6 +42,8 @@ deployment, no CI/CD.
 - [Document types and extracted fields](#document-types-and-extracted-fields)
 - [Data model](#data-model)
 - [Human review workflow](#human-review-workflow)
+- [The document viewer](#the-document-viewer)
+- [Logging and the audit trail](#logging-and-the-audit-trail)
 - [Excel export](#excel-export)
 - [Batch processing](#batch-processing)
 - [Analytics](#analytics)
@@ -56,6 +64,8 @@ deployment, no CI/CD.
 | Document-type classification (5 labels) | `POST /documents/{filename}/classify` |
 | Structured field extraction per type | `POST /documents/{filename}/extract` |
 | Human review with a full correction audit trail | `GET` / `PATCH /documents/{filename}/review` |
+| In-page PDF/image viewer: zoom, fit-to-width, page navigation, download, value highlighting | `frontend/src/components/DocumentViewer.jsx` |
+| Merged audit history — field changes *and* approve/reject actions | `GET /documents/{filename}/audit` |
 | Bulk `.xlsx` export with filters | `GET /documents/export/xlsx` |
 | Pipeline health and throughput metrics | `GET /analytics/summary`, `/analytics/daily-trend` |
 | Browsable document records | `GET /documents`, `GET`/`DELETE /documents/{filename}` |
@@ -63,17 +73,20 @@ deployment, no CI/CD.
 | Batch upload of up to 500 files, processed in the background | `POST /batches/upload` |
 | Live batch progress, retries, per-file outcomes | `GET /batches/{id}`, `/stream`, `POST /batches/{id}/retry` |
 | Batch throughput and volume metrics | `GET /analytics/batches`, `/analytics/batch-volume` |
+| Searchable, sortable, filterable application log | `GET /logs`, `GET /logs/{id}` |
+| Log analytics: error trend, event distribution, processing-time trend | `GET /logs/analytics` |
+| Excel export of all / filtered / error-only / date-ranged logs | `GET /logs/export/xlsx` |
 
 ---
 
 ## Screenshots
 
-> **The six image files are not in the repository yet.** The links below
+> **The seven image files are not in the repository yet.** The links below
 > point at `docs/screenshots/`, which currently holds only a capture
 > guide — see [`docs/screenshots/README.md`](docs/screenshots/README.md)
 > for exactly what each shot should contain and what size to take it at.
-> Drop the six PNGs in with these names and this section renders; nothing
-> else needs changing.
+> Drop the seven PNGs in with these names and this section renders;
+> nothing else needs changing.
 
 ### Process — one document or a batch
 
@@ -110,8 +123,17 @@ the one that needs a person.
 The source is on the left, the editable fields on the right. The left
 pane tabs between the **original scan or PDF** and the **OCR text**; the
 document is the default, because a field is ultimately right or wrong
-against the paper, not against another machine output. Corrections are
-stored alongside the model's answer, never on top of it.
+against the paper, not against another machine output.
+
+The document view is a real viewer, not an embedded browser frame: zoom,
+fit-to-width, page navigation through a multi-page PDF, download, and —
+where the page has a text layer — the extracted values **highlighted in
+place on the page they came from**. See
+[The document viewer](#the-document-viewer).
+
+Corrections are stored alongside the model's answer, never on top of it,
+and the **Audit history** panel interleaves every value that changed with
+every approve/reject decision, newest first.
 
 ### Documents
 
@@ -130,6 +152,16 @@ plus batch success rate and daily volume once any batch has run. The
 charts are hand-drawn SVG sharing the theme's colour tokens, so a
 document type is the same colour in a chart, a badge, and a table row, in
 both light and dark mode.
+
+### Logs
+
+![The logs screen: the analytics panel of stat cards and three charts above a filtered table of log entries](docs/screenshots/logs.png)
+
+Every recorded event, newest first, with free-text search, five filters,
+sortable columns, server-side paging, and Excel export of exactly what is
+on screen. The analytics panel above the table is collapsible, and each
+of its five cards is a filter button — clicking "OCR failures" narrows
+the table to the rows that number was counted from.
 
 ---
 
@@ -216,6 +248,8 @@ batch path does not: it OCRs once and passes the text down. See
 - React 19, Vite 8
 - Axios (single shared client instance)
 - `EventSource` for live batch progress, with a polling fallback
+- PDF.js (`pdfjs-dist`) for the in-page document viewer — dynamically
+  imported, so it is downloaded only when a reviewer opens a PDF
 - oxlint
 - Hand-rolled SVG charts — no charting library
 
@@ -238,13 +272,15 @@ Intelligent OCR Document Processing System/
 │   │       ├── ocr.py              # POST /documents/{f}/ocr
 │   │       ├── classification.py   # POST /documents/{f}/classify
 │   │       ├── extraction.py       # POST /documents/{f}/extract
-│   │       ├── review.py           # GET + PATCH /documents/{f}/review
+│   │       ├── review.py           # GET + PATCH /documents/{f}/review, GET /documents/{f}/audit
 │   │       ├── export.py           # GET /documents/export/xlsx
 │   │       ├── analytics.py        # GET /analytics/*
+│   │       ├── logs.py             # GET /logs, /logs/filters, /logs/analytics, /logs/export/xlsx, /logs/{id}
 │   │       ├── batches.py          # POST/GET/DELETE /batches/*, incl. the SSE stream
 │   │       └── documents.py        # GET/DELETE document records
 │   ├── core/                       # config, enums, exceptions, Vertex client (imports nothing above it)
 │   │   ├── batch_status.py         # BatchStatus / BatchFileStatus enums
+│   │   ├── log_events.py           # LogEventType / LogCategory / LogStatus + the event→category map
 │   │   └── async_runner.py         # per-thread event loop, for the worker pools
 │   ├── worker/                     # Celery
 │   │   ├── celery_app.py           # broker/backend config + the Windows notes
@@ -253,25 +289,38 @@ Intelligent OCR Document Processing System/
 │   │   ├── document_pipeline.py    # the shared OCR → classify → extract sequence
 │   │   ├── batch_service.py        # staging a multi-file upload to disk
 │   │   ├── batch_dispatch.py       # chooses Celery or the in-process fallback
+│   │   ├── event_log.py            # the one write path for the application log
+│   │   ├── batch_events.py         # the log rows a batch worker writes (shared by both executors)
+│   │   ├── audit_service.py        # merges field corrections with review actions
+│   │   ├── log_export_service.py   # streams the logs workbook
 │   │   └── prompts/                # Vertex AI prompt + JSON schema definitions
 │   ├── schemas/                    # Pydantic request/response contracts
 │   ├── database/                   # engine, session, models, CRUD, analytics queries
 │   │   ├── batch_crud.py           # claim/record/recompute — the concurrency-critical half
 │   │   ├── batch_analytics.py      # batch throughput and volume queries
+│   │   ├── log_crud.py             # log filtering, paging, export iteration, log analytics
 │   │   └── app.db                  # SQLite file (git-ignored)
 │   ├── tests/                      # pytest: batch API + CRUD, with the pipeline stubbed
 │   ├── credentials/                # service account key goes here (git-ignored)
 │   └── uploads/                    # stored files (git-ignored)
 ├── frontend/
 │   ├── .env                        # VITE_API_BASE_URL
-│   ├── vite.config.js
+│   ├── vite.config.js              # + the plugin that serves PDF.js's WASM decoders and fonts
 │   └── src/
 │       ├── App.jsx                 # the route table, wrapped in the app shell
-│       ├── api/                    # axios client + endpoint wrappers
-│       ├── hooks/                  # useDocumentPipeline, useDocumentReview, useAnalytics,
-│       │                           #   useBatches, useBatchDetail, useBatchProgress (SSE)
-│       ├── pages/                  # Upload, Documents, Review, Batches, BatchDetail, Analytics
-│       ├── components/             # presentational components (incl. analytics/ and batch/)
+│       ├── api/                    # axios client + endpoint wrappers (documents, batches, analytics, logs)
+│       ├── hooks/                  # useDocumentPipeline, useDocumentReview, useDocumentAudit,
+│       │                           #   useAnalytics, useBatches, useBatchDetail, useBatchProgress (SSE),
+│       │                           #   useLogs, useLogDetail, useLogAnalytics, useLogExport
+│       ├── pages/                  # Upload, Documents, Review, Batches, BatchDetail, Analytics,
+│       │                           #   Logs, LogDetail
+│       ├── components/
+│       │   ├── DocumentViewer.jsx  # the review screen's PDF/image viewer
+│       │   ├── AuditHistory.jsx    # the merged audit panel
+│       │   ├── viewer/             # PDF.js wiring, one-page renderer, highlight search
+│       │   ├── logs/               # log chips, JSON block, the three log charts, analytics panel
+│       │   ├── analytics/          # the document/batch charts and stat cards
+│       │   └── batch/              # batch upload, progress, file table
 │       └── utils/                  # formatting and label helpers
 ├── docs/
 │   ├── architecture.md             # layering rules and design rationale
@@ -287,7 +336,12 @@ Lower layers never import from higher ones:
 - `core/` holds cross-cutting config and enums and imports from nothing else.
 - `services/` takes plain data in and returns plain data out — no FastAPI
   imports, no `Session` arguments. This keeps business logic unit-testable
-  without HTTP or a transaction.
+  without HTTP or a transaction. The one deliberate exception is
+  `services/event_log.py` (and `batch_events.py` on top of it), where
+  writing the row *is* the whole operation: a version that returned "the
+  row you should write" for the route layer to persist would be a
+  strictly more awkward way to spell the same thing, imposed at thirty
+  call sites.
 - `database/` owns persistence and translates driver errors into the
   app's own exception types.
 - `api/` does HTTP concerns only: look things up, choose a status code,
@@ -564,11 +618,15 @@ file is missing, `src/api/client.js` falls back to that same default.
    and the extracted fields.
 3. Click **Review & correct fields** to open the review screen. The
    original scan or PDF sits on the left (with the OCR text one tab
-   away) and every extracted field is editable on the right. Corrections
-   are stored alongside the model's original values — never on top of
-   them — and each is logged with the value it replaced under
-   **Correction history**. **Approve** or **Reject** records a verdict
-   on the whole document.
+   away) and every extracted field is editable on the right.
+
+   The viewer's toolbar gives you page navigation, zoom, fit-to-width,
+   a download of the original file, and a highlight toggle that marks
+   the extracted values on the page they came from. Corrections are
+   stored alongside the model's original values — never on top of them
+   — and **Audit history** shows every change and every decision,
+   newest first. **Approve** or **Reject** records a verdict on the
+   whole document.
 4. **Documents** tab — everything processed so far, whenever it was
    processed. Search across filenames and extracted values, filter by
    type and review status, open any document for review, and export what
@@ -576,6 +634,16 @@ file is missing, `src/api/client.js` falls back to that same default.
 5. **Analytics** tab — totals, per-type breakdown, per-stage success
    rates, a daily trend chart, and — once any batch has run — batch
    throughput, success rate, and daily batch volume.
+6. **Logs** tab — every event the platform has recorded, newest first.
+   Search the message, filename or batch id; filter by category, event
+   type, status, document type and date range; sort any indexed column;
+   and export exactly what you are looking at to Excel. **Analytics**
+   (top right) opens the dashboard above the table, where each card
+   doubles as a filter. Any row opens a detail page with the full JSON
+   payload and links to the document and batch it was about.
+
+   You can collapse the sidebar to an icon rail at any time with the
+   button at the top left; the choice is remembered in the browser.
 
 ---
 
@@ -804,6 +872,171 @@ a traversal attempt in the URL reaches nothing; and the extension is
 checked against the upload allow-list, so only PDF/PNG/JPEG can ever be
 served whatever else ends up in that folder.
 
+### Audit history
+
+```http
+GET /api/v1/documents/{filename}/audit?limit=100
+```
+
+The document's full history — every field a reviewer changed and every
+approve/reject decision — merged into one list, **newest first**.
+
+```json
+{
+  "filename": "4fb2bb81....pdf",
+  "total_entries": 4,
+  "entries": [
+    {
+      "kind": "action",
+      "occurred_at": "2026-09-21T11:52:10Z",
+      "event_type": "Document Approved",
+      "summary": "Document approved",
+      "field_name": null, "original_value": null, "updated_value": null,
+      "changed_fields": null
+    },
+    {
+      "kind": "action",
+      "occurred_at": "2026-09-21T11:51:58Z",
+      "event_type": "Review Saved",
+      "summary": "Corrections saved (2 fields)",
+      "changed_fields": ["vendor_name", "total_amount"]
+    },
+    {
+      "kind": "field_change",
+      "occurred_at": "2026-09-21T11:51:58Z",
+      "summary": "'vendor_name' changed",
+      "field_name": "vendor_name",
+      "original_value": "Acme",
+      "updated_value": "Acme Ltd"
+    }
+  ]
+}
+```
+
+`total_entries` is the count **before** `limit` is applied, so a panel
+showing the most recent 100 of 340 can say so.
+
+Unlike the review endpoints, this one does not require the document to
+have been extracted — a document that classified as `Unknown` has no
+fields but can still have been opened and rejected, and a 409 there
+would hide exactly the history explaining why. A filename with no record
+is still a 404.
+
+### Logs
+
+```http
+GET    /api/v1/logs
+GET    /api/v1/logs/filters
+GET    /api/v1/logs/analytics?days=30
+GET    /api/v1/logs/export/xlsx
+GET    /api/v1/logs/{log_id}
+```
+
+**`GET /logs`** — one page of entries plus the total the filters
+matched. Everything is applied server-side.
+
+| Parameter | Notes |
+|---|---|
+| `skip`, `limit` | Offset paging; `limit` is 1–500, default 50 |
+| `sort_by` | `created_at` (default), `event_type`, `event_category`, `status`, `filename`, `processing_time`. An unknown value falls back to the default rather than answering 422 — a sort order is a display preference, not a request for data |
+| `sort_dir` | `asc` \| `desc` (default) |
+| `search` | Case-insensitive match on the message, stored filename, or batch id |
+| `event_type` | e.g. `OCR Failed` |
+| `event_category` | e.g. `Extraction` |
+| `status` | `Started` \| `Success` \| `Failure` \| `Warning` |
+| `document_type` | e.g. `Invoice` |
+| `batch_id`, `filename` | Exact match |
+| `date_from`, `date_to` | ISO timestamps |
+
+```json
+{
+  "total": 1284,
+  "skip": 0,
+  "limit": 50,
+  "logs": [
+    {
+      "id": 1284,
+      "event_type": "OCR Failed",
+      "event_category": "OCR",
+      "status": "Failure",
+      "message": "OCR failed for 'a1b2....pdf': The AI service timed out.",
+      "document_id": 42,
+      "batch_id": "9f1c...",
+      "filename": "a1b2....pdf",
+      "document_type": "Unknown",
+      "details_json": { "stage": "OCR", "duration_ms": 60142, "error_type": "OCRTimeoutError" },
+      "processing_time": 60.142,
+      "created_at": "2026-09-21T11:46:11Z"
+    }
+  ]
+}
+```
+
+**`GET /logs/filters`** — the values each dropdown may offer, straight
+from the enums rather than from `SELECT DISTINCT`. That matters: a
+distinct query would not offer "Failure" on a system where nothing had
+failed yet, and the first person looking for errors would conclude the
+filter was broken.
+
+**`GET /logs/analytics?days=30`** — the five cards and three trend
+series, in one call.
+
+```json
+{
+  "generated_at": "2026-09-21T11:46:11Z",
+  "days": 30,
+  "total_logs": 1284,
+  "errors_today": 3,
+  "ocr_failures": 1,
+  "extraction_failures": 2,
+  "batch_failures": 0,
+  "events_by_category": [{ "event_category": "OCR", "count": 420 }],
+  "error_trend": [{ "date": "2026-09-21", "errors": 3, "warnings": 0, "total": 118 }],
+  "processing_time_trend": [{ "date": "2026-09-21", "average_seconds": 2.41, "timed_events": 96 }]
+}
+```
+
+`total_logs` is deliberately *not* windowed while everything else is —
+it answers "how much history is there", which a 30-day window would make
+meaningless. Both trends are zero-filled and oldest-day-first, and
+`average_seconds` is `null` (never `0.0`) on a day with no timed
+operation, so the chart can break its line instead of drawing a dip that
+claims everything became instantaneous.
+
+**`GET /logs/export/xlsx`** — takes the *same* filters as `GET /logs`
+and streams a workbook. One endpoint serves every export the screen
+offers: no parameters is "everything", the screen's filters is "what I'm
+looking at", `status=Failure` is "errors only", `event_category=OCR` is
+"OCR only", and the two timestamps are a date range. Columns:
+
+| Timestamp | Event Type | Category | Filename | Status | Message | Processing Time (s) | Batch ID | Details |
+|---|---|---|---|---|---|---|---|---|
+
+The last two are beyond the minimum and are there because the reason to
+export logs is almost always to investigate a failure *somewhere else* —
+in a ticket, a mail thread, a spreadsheet — and a failure row whose
+`details_json` was dropped has lost the part naming the stage, the error
+type, and which of the batch's four hundred files it was.
+
+**`GET /logs/{log_id}`** — one entry with its related records resolved,
+so a details screen does not have to answer "what was this about?" with
+an opaque `document_id`.
+
+```json
+{
+  "log": { "...": "as above" },
+  "document_exists": false,
+  "document_review_status": null,
+  "batch_exists": true,
+  "batch_name": "Monday invoices",
+  "related_log_count": 37
+}
+```
+
+`document_exists: false` is not an error. A log deliberately outlives
+its subject, and "the document this refers to has since been deleted" is
+one of the more useful things an audit trail can state.
+
 ### Excel export
 
 ```http
@@ -931,8 +1164,8 @@ reviewer typed would report a save that never happened.
 
 ## Data model
 
-Five SQLite tables (`database/models.py`): three for documents and their
-review trail, two for batches.
+Six SQLite tables (`database/models.py`): three for documents and their
+review trail, two for batches, and one for the application log.
 
 ### `documents`
 
@@ -1021,6 +1254,40 @@ OCR-ing the same document twice.
 
 ---
 
+### `application_logs`
+
+The append-only narrative of everything the platform does.
+
+| Column | Notes |
+|---|---|
+| `id` | Primary key |
+| `event_type` | e.g. `OCR Started`, `Document Approved`, `Batch Completed` — indexed |
+| `event_category` | Upload / OCR / Classification / Extraction / Review / Approval / Rejection / Batch / Retry / Export / Error / System — indexed, and **derived from the event type**, never chosen at the call site |
+| `status` | `Started` \| `Success` \| `Failure` \| `Warning` — indexed |
+| `document_id` | The document this was about, if any. **Not a foreign key** |
+| `batch_id` | The batch this belongs to, if any. Not a foreign key |
+| `filename` | Stored filename, kept readable after the document row is gone |
+| `document_type` | Denormalized, so "every extraction failure on invoices" is a filter and not a join |
+| `message` | One sentence, written to be read by a person |
+| `details_json` | Whatever structured detail the call site had: the fields a save touched, the filters an export ran with, the counts a batch finished on |
+| `processing_time` | Seconds the operation took. `null` on a `Started` row and on events that are instants rather than operations |
+| `created_at` | Indexed — every query orders by it and every analytics bucket scopes on it |
+
+**Why no foreign keys.** A log records that something *happened*.
+Deleting the document or batch it happened to must not delete the
+evidence, and "the record this refers to has since been deleted" is a
+perfectly good state for an audit log to be in. Same reasoning as
+`processing_events`.
+
+**Why two rows per operation.** A long operation writes `Started` and
+then `Success`/`Failure` rather than one row that is later mutated. That
+is what makes an operation which never returned *visible*: a lone
+`Started` with no partner is the signature of a worker that died
+mid-file, and a schema that updated one row in place could not represent
+it.
+
+---
+
 ## Human review workflow
 
 The review screen puts the source on the left and the editable fields on
@@ -1058,6 +1325,208 @@ trusted.
 - Corrections and the status change are written in a **single
   transaction** (`crud.save_review`), so there is no window where data
   claims to be corrected but nothing records what it replaced.
+
+---
+
+## The document viewer
+
+The review screen's left pane renders PDFs with **PDF.js**, not with an
+`<iframe>` pointed at the file.
+
+The iframe was the right first answer — it cost nothing, and every
+browser ships a good PDF viewer. It stopped being right the moment the
+*application* needed to drive the viewer, because an iframe is opaque to
+the page containing it: its zoom cannot be read or set, its current page
+cannot be asked for or changed, and its text cannot be reached. That is
+three of the five things this pane has to do.
+
+**What the toolbar gives you**
+
+| Control | PDF | Image |
+|---|---|---|
+| Page navigation | ✔ | greyed out, showing `1 / 1` |
+| Zoom in / out | ✔ | ✔ |
+| Fit to width | ✔ (the default) | ✔ (the default) |
+| Download the original | ✔ | ✔ |
+| Open in a new tab | ✔ | ✔ |
+| Highlight extracted values | ✔ where the page has a text layer | not possible — explained in the tooltip |
+
+Controls a given file cannot support are **disabled and explained**
+rather than hidden: a greyed-out `1 / 1` says "this document has one
+page", where an absent control says nothing at all.
+
+**One page at a time.** Only the page being looked at is rasterized, so
+memory and render time are a function of that page and not of how many
+pages the document has — a 400-page file opens as fast as a one-page
+one. That is the whole answer to "support large PDFs".
+
+**Fit-to-width is the default**, and it is re-applied when the pane
+changes size, so dragging the window narrower keeps the document fitting
+instead of quietly clipping it. Zooming takes manual control and the
+automatic fit stops, because otherwise the next resize would silently
+undo the reviewer's choice.
+
+**Highlighting is a text search, and says so.** Nothing in the
+extraction pipeline produces coordinates — `schemas/extraction.py`
+produces values and the OCR stage produces a flat transcript — so a
+highlight is the viewer *finding the value again*, not being told where
+it was. Three consequences, each surfaced in the UI rather than left to
+be discovered:
+
+- A scanned image, or a scan embedded in a PDF, has no text layer and
+  nothing can be highlighted on it.
+- A text-bearing page may simply not contain the value — the toolbar
+  reports a match *count* per page rather than claiming to have found
+  "the" value.
+- A value the model normalized may no longer match the characters on the
+  page. `viewer/highlightTerms.js` recovers the common cases (an Aadhaar
+  number printed in spaced groups, an amount printed with thousands
+  separators) by searching several spellings of each value; it cannot
+  recover all of them. A date extracted as `2026-09-14` will not be
+  found on a page that prints "14 September 2026".
+
+Values that would match too much are deliberately not searched for: a
+term needs four characters, and a bare number needs six digits, so
+"2026" never lights up half an invoice.
+
+**Offline by construction.** PDF.js fetches four kinds of side file at
+runtime, and they are served from the app's own origin by a small plugin
+in `frontend/vite.config.js` — never a CDN, because this is a local
+install that has to work with no internet connection. The JBIG2 and
+JPEG 2000 WASM decoders in that set are not optional extras: both are
+standard compression formats *for scanned documents*, and a PDF using
+either renders as a blank page without them.
+
+PDF.js itself is dynamically imported, so the ~430 kB chunk is
+downloaded by the reviewer who opens a PDF, not by every page load of
+the app.
+
+---
+
+## Logging and the audit trail
+
+### Two tables, two questions
+
+`application_logs` sits alongside `processing_events`, not instead of
+it, and the split is the point:
+
+| | `processing_events` | `application_logs` |
+|---|---|---|
+| Answers | "how often does OCR succeed, and how fast" | "what happened to this document / this batch" |
+| Shape | three stages, two outcomes, a duration — every column group-by-able | an event, a sentence, a JSON payload, optional document/batch/filename |
+| Covers | the three Vertex stages only | uploads, reviews, approvals, batches, retries, exports, startup |
+| Feeds | the Analytics dashboard | the Logs screen |
+
+Widening `processing_events` with a message and a payload would turn the
+table the Analytics dashboard scans on every page load into the table
+that also absorbs every free-text event in the system. Both are written
+from the same call sites — `api/processing_metrics.py` writes one of
+each per stage attempt — so they cannot drift apart.
+
+### What gets logged
+
+| Category | Events |
+|---|---|
+| Upload | Upload Started / Completed / **Rejected** |
+| OCR | OCR Started / Completed / Failed |
+| Classification | Classification Started / Completed / Failed |
+| Extraction | Extraction Started / Completed / Failed |
+| Review | Review Opened, Review Saved |
+| Approval / Rejection | Document Approved, Document Rejected |
+| Batch | Batch Started, Batch File Started / Completed / Failed, Batch Completed, Batch Deleted |
+| Retry | Retry Started, Retry Completed |
+| Export | Export Started / Completed |
+| Error / System | Error, System Event (including API startup) |
+
+The rejected upload is the one most worth having. Every other stage is
+reachable from a `Document` row, so a failure there is findable later by
+looking the document up — but a rejected upload creates no row and
+leaves no file, so without that entry the only evidence anyone tried to
+upload a 40 MB TIFF at 4pm is a 415 in a web-server access log nobody
+keeps.
+
+### The vocabulary lives in one place
+
+`core/log_events.py` owns the event types, the categories, the statuses,
+and — critically — the **event → category mapping**. A call site names
+only the event; the category follows. Left to call sites, "OCR
+Completed" would eventually be filed under `System` somewhere and the
+analytics breakdown would quietly under-count OCR: a class of bug that
+is invisible until someone notices a number is too low and has no way to
+tell when it started.
+
+A stage *failure* gets its own event type (`OCR Failed`, not `OCR
+Completed` with a `Failure` status) for the same reason. A row reading
+"Completed" next to "Failure" is a contradiction the reader has to
+resolve every time they scan the table — and, because the category is
+derived from the event, filing failures under a generic `Error` event
+would put them in the `Error` category, where the per-category failure
+cards would never find them.
+
+### The write path
+
+`services/event_log.py` is the narrow waist:
+
+- **`log_event`** — one row for a moment that happened.
+- **`track_event`** — wraps an operation: `Started` before, then
+  `Success`/`Failure` with the elapsed seconds. It yields a mutable
+  `details` dict so the block can report facts it does not know until it
+  has finished (the number of rows an export wrote, the type a document
+  classified as).
+- **`log_once`** — for the handful of events that describe a *whole
+  thing* finishing. A batch's completion is noticed by whichever file
+  finishes last, and two files finishing in the same instant would both
+  see a terminal status. One duplicate row is not a formatting nuisance
+  on an audit log; it is the log asserting the batch completed twice.
+
+**Nothing in that module may raise.** Not "should not" — may not. Every
+call site is real work with its own contract (an upload that must return
+the stored filename, a batch file that must record its own outcome), and
+none of them is prepared for the logger to fail. Database errors are
+swallowed *with a rollback*, because without one the caller's next
+commit would fail too — which would turn a best-effort logger into the
+thing that broke the request it was only supposed to observe.
+
+### What it costs
+
+A fully processed document writes 3 `processing_events` rows and 6
+`application_logs` rows. At 500 files that is ~4,500 small commits
+against SQLite, which the WAL journal and the 15-second busy timeout in
+`database/session.py` are already configured for.
+
+The `Started` rows are half that volume and they earn it: a lone
+`Started` with no partner is the only signature a stuck batch leaves
+behind. Nothing prunes the table yet — see [Known gaps](#known-gaps).
+
+### The audit trail
+
+A document's history has two halves, stored separately because they are
+genuinely different things:
+
+- **`field_corrections`** — values that changed. One append-only row per
+  field per save, each anchored to the model's *original* extraction, so
+  correcting the same field three times produces three rows that all
+  cite the same original and "how far has this drifted from what the
+  machine read" stays answerable.
+- **`application_logs`** — decisions somebody made: a save happened, a
+  document was approved, a document was rejected. These change no value,
+  which is exactly why `save_review_decision` writes no correction rows
+  — inventing audit entries saying a field was "corrected" to the value
+  it already had would make the trail say something untrue.
+
+`services/audit_service.py` merges them into one chronological list,
+newest first, and `GET /documents/{filename}/audit` serves it. Ties are
+broken so a save sorts *above* the field changes it describes: both are
+written within the same few milliseconds, and an arbitrary tie-break
+would scatter a save's own changes above and below the line announcing
+it.
+
+The **Audit history** panel on the review screen starts collapsed and
+does not fetch until it is opened — the history is evidence to be
+consulted, not the thing a reviewer is working on. It reloads after
+every save and every decision, because a panel still showing the state
+from before the action the reviewer just took looks like the action was
+not recorded.
 
 ---
 
@@ -1200,6 +1669,18 @@ updates every two seconds.
 
 ## Analytics
 
+The app has **two** dashboards, and they answer different questions.
+[Logging and the audit trail](#logging-and-the-audit-trail) explains why
+the underlying tables are separate; this is what each screen is for:
+
+| | **Analytics** tab | **Logs** tab → Analytics panel |
+|---|---|---|
+| Question | Is the pipeline healthy and fast? | What has been happening, and what went wrong? |
+| Source | `processing_events` + `documents` + `batches` | `application_logs` |
+| Cards | totals, avg processing time, per-stage success rates | total logs, errors today, OCR / extraction / batch failures |
+| Charts | documents by type, daily upload-vs-extract trend, batch volume | error trend, event distribution, processing-time trend |
+| Drill-down | none — it is a summary | every card filters the log table beneath it |
+
 `database/analytics.py` computes everything fresh on each request, with no
 caching or pre-aggregation — at this scale it is the same handful of
 `GROUP BY`/`AVG` queries either way, and a dashboard that can silently show
@@ -1233,7 +1714,7 @@ pytest tests/test_batch_api.py -q
 pytest -q -k traversal         # one behaviour
 ```
 
-**65 tests**, all offline — nothing here calls Vertex AI, needs
+**90 tests**, all offline — nothing here calls Vertex AI, needs
 credentials, or costs anything per run.
 
 | File | Covers |
@@ -1241,6 +1722,7 @@ credentials, or costs anything per run.
 | `tests/test_batch_api.py` | The HTTP surface end to end: upload, dispatch, claiming, progress, retries, the SSE stream, delete, plus a regression class asserting the pre-batch endpoints still work |
 | `tests/test_batch_crud.py` | The persistence layer directly — the compare-and-set claim, counter recomputation, retry caps |
 | `tests/test_document_file.py` | The file-preview endpoint, most of it about path traversal and the extension allow-list |
+| `tests/test_logs_api.py` | The Logs module, in two halves: that real operations leave the right trail (uploads, rejections, a batch run writing exactly one completion row, a failed file, a retry closing its loop, a deleted batch keeping its history, an export recording its row count), and that the read side filters, searches, sorts, pages, and exports correctly — plus the merged audit history |
 
 Three details in `conftest.py` are load-bearing, and each exists because
 getting it wrong produced a real failure:
@@ -1260,6 +1742,13 @@ getting it wrong produced a real failure:
   would claim the next test's file 3 and process it with the previous
   test's stub. The symptom was one unrelated test failing per full run,
   about one run in three.
+
+A fourth detail is specific to the log tests: the `client` fixture
+starts the application, and startup deliberately writes a `System Event`
+row (see [Logging](#logging-and-the-audit-trail)). The read-side tests
+therefore build the client *first*, clear the table, and seed exactly
+what they mean to query — otherwise every count in them would silently
+depend on how many rows startup happens to log.
 
 The pipeline itself is stubbed (`stub_pipeline`), which is what makes the
 suite free and deterministic. The stub can also be *gated* — held mid-file
@@ -1422,9 +1911,30 @@ to hunt.
    not instead of Redis. Files left `Processing` by a restart need a batch
    retry to recover.
 
-8. **No frontend tests.** The backend has 65 (see [Tests](#tests)); the
+8. **No frontend tests.** The backend has 90 (see [Tests](#tests)); the
    React side has none, so the layouts, the SSE hook's fallback, and the
-   document preview are covered by nothing but manual use.
+   document viewer are covered by nothing but manual use. The viewer's
+   highlight search and the PDF page renderer are the parts that would
+   most repay a test runner.
+
+9. **Nothing prunes `application_logs`.** It is the fastest-growing
+   table in the schema — a fully processed document writes six rows —
+   and there is no retention policy, no archival, and no rollup. A
+   scheduled delete of rows older than N days is the obvious next step;
+   until then, an install processing thousands of documents a week will
+   want to watch the database file.
+
+10. **Highlighting cannot find every value.** It is a text search over
+    the PDF's text layer, not a coordinate the model returned — see
+    [The document viewer](#the-document-viewer) for what that rules out.
+    Bounding boxes would need the extraction stage to return them, which
+    is a change to the Vertex prompts and schemas, not to the viewer.
+
+11. **The log's "related entries" link is a search, not a join.** The
+    detail page links to `/logs?q=<batch id or filename>`, which is a
+    free-text match rather than a query on the indexed relation. It is
+    right in practice and would be wrong for a filename that happened to
+    appear inside another entry's message.
 
 ---
 
@@ -1442,5 +1952,10 @@ to hunt.
   `backend/worker/tasks.py` (why one task per file),
   `backend/services/batch_dispatch.py` (what the inline fallback is and
   is not), `backend/database/batch_crud.py` (the claim and the atomic
-  recompute), and `frontend/src/hooks/useBatchProgress.js` (why the SSE
-  stream carries a polling fallback).
+  recompute), `backend/core/log_events.py` (why an event has both a type
+  and a category), `backend/services/event_log.py` (why a logger may not
+  raise), `backend/services/audit_service.py` (why the audit trail is a
+  merge of two tables), `frontend/src/components/viewer/highlightTerms.js`
+  (what "highlight when possible" actually means), and
+  `frontend/src/hooks/useBatchProgress.js` (why the SSE stream carries a
+  polling fallback).

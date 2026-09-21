@@ -15,8 +15,21 @@
 import CloudUploadIcon from '@mui/icons-material/CloudUpload'
 import DescriptionIcon from '@mui/icons-material/Description'
 import InsightsIcon from '@mui/icons-material/Insights'
+import ReceiptLongIcon from '@mui/icons-material/ReceiptLong'
 
 export const SIDEBAR_WIDTH = 256
+
+/**
+ * The sidebar's width when collapsed.
+ *
+ * A narrow icon rail rather than zero, which is the point of the
+ * feature: someone collapses the sidebar to give a wide screen — the
+ * documents table, the two-pane review — more room, not to give up
+ * navigating. 72px is wide enough for a 40px touch target with even
+ * gutters, and narrow enough that reclaiming 184px is visibly worth
+ * doing.
+ */
+export const SIDEBAR_COLLAPSED_WIDTH = 72
 
 export const NAV_ITEMS = [
   {
@@ -48,6 +61,15 @@ export const NAV_ITEMS = [
     description: 'Pipeline health',
     icon: InsightsIcon,
     end: true,
+  },
+  {
+    to: '/logs',
+    label: 'Logs',
+    description: 'Every event, searchable',
+    icon: ReceiptLongIcon,
+    // `end` omitted, so the entry stays selected on `/logs/:logId` —
+    // the same rule Documents follows for its review screen.
+    end: false,
   },
 ]
 

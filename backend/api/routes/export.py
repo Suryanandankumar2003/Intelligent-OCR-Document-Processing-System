@@ -22,9 +22,11 @@ from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
 from core.document_types import DocumentType
+from core.log_events import LogEventType
 from core.review_status import ReviewStatus
 from database import crud
 from database.session import get_db
+from services.event_log import track_event
 from services.export_service import iter_matching_search, write_documents_xlsx
 
 router = APIRouter(prefix="/documents", tags=["Export"])
@@ -126,7 +128,40 @@ def export_documents_xlsx(
     os.close(fd)  # Only the path is needed; openpyxl opens and writes the file itself.
     destination = Path(tmp_path)
 
-    write_documents_xlsx(documents, destination)
+    # Logged as a started/completed pair, because an export is the one
+    # read-only operation in this system that can take long enough to be
+    # abandoned halfway. A lone `Export Started` with no partner is how
+    # an operator finds out that the download they thought was slow was
+    # actually a request that died — a distinction a single completion
+    # row could not make.
+    #
+    # The filters go in `details` on both rows, so a support question of
+    # the form "the spreadsheet I pulled on Tuesday was missing things"
+    # is answerable from the log rather than from memory.
+    filters_used = {
+        "document_type": document_type.value if document_type else None,
+        "review_status": review_status.value if review_status else None,
+        # Recorded as a flag, not a value: it is free-text the operator
+        # typed, and an audit log is not the place to accumulate a
+        # searchable history of what people looked for.
+        "search_applied": bool(search and search.strip()),
+        "uploaded_from": uploaded_from.isoformat() if uploaded_from else None,
+        "uploaded_to": uploaded_to.isoformat() if uploaded_to else None,
+    }
+    with track_event(
+        db,
+        started=LogEventType.EXPORT_STARTED,
+        completed=LogEventType.EXPORT_COMPLETED,
+        start_message="Document export started.",
+        success_message="Document export completed.",
+        document_type=document_type,
+    ) as details:
+        details.update({"format": "xlsx", "filters": filters_used})
+        # The row count is only known once the workbook is written, which
+        # is exactly what the mutable `details` dict `track_event` yields
+        # exists for — the completion row carries it, the start row
+        # could not have.
+        details["row_count"] = write_documents_xlsx(documents, destination)
 
     return FileResponse(
         destination,

@@ -61,6 +61,7 @@ from sqlalchemy.orm import Session
 from core.batch_status import ACTIVE_BATCH_STATUSES, BatchFileStatus, BatchStatus
 from core.config import get_settings
 from core.exceptions import BatchFileNotFoundError, BatchNotFoundError, NothingToRetryError
+from core.log_events import LogEventType, LogStatus
 from database import batch_crud
 from database.models import Batch
 from database.session import SessionLocal, get_db
@@ -76,6 +77,7 @@ from schemas.batch import (
 )
 from services import batch_dispatch
 from services.batch_service import resolve_batch_name, stage_batch_files
+from services.event_log import log_event
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -151,6 +153,35 @@ async def upload_batch(
 
     executor = batch_dispatch.dispatch_batch(db, batch.id)
     db.refresh(batch)
+
+    # Logged here rather than from `mark_batch_started`, which every
+    # worker also calls: this is the one place a batch is created, so it
+    # is the one place "this batch began" can be recorded exactly once
+    # without a de-duplication check. The executor goes in the payload
+    # because "why was this batch slow" is unanswerable without knowing
+    # whether Celery or the in-process fallback ran it — the same reason
+    # `batches.executor` is a stored column.
+    log_event(
+        db,
+        event_type=LogEventType.BATCH_STARTED,
+        status=LogStatus.STARTED,
+        message=f"Batch '{batch.batch_name}' started with {batch.total_files} file(s).",
+        batch_id=batch.id,
+        details={
+            "batch_name": batch.batch_name,
+            "total_files": batch.total_files,
+            "executor": executor,
+            "rejected_count": len(staged.rejected),
+            # The rejected names are the reason this payload is worth
+            # keeping: they are the only record that those files were
+            # ever offered, since nothing was stored for them and no
+            # per-file row exists to carry the reason.
+            "rejected": [
+                {"original_filename": item.original_filename, "reason": item.reason}
+                for item in staged.rejected
+            ],
+        },
+    )
 
     return BatchCreatedResponse(
         batch_id=batch.id,
@@ -407,14 +438,38 @@ def retry_batch(batch_id: str, db: Session = Depends(get_db)) -> RetryResponse:
     answers `NothingToRetryError` (409) rather than a success that
     queued nothing.
     """
-    _require_batch(db, batch_id)
+    batch = _require_batch(db, batch_id)
     retried, executor = batch_dispatch.retry_batch(db, batch_id)
 
     if not retried:
+        # Deliberately not logged. Nothing happened — the operator
+        # clicked a button and the system declined — and an audit log
+        # that records refused requests alongside real work makes the
+        # real work harder to find. The 409 is the feedback here.
         raise NothingToRetryError(
             f"Nothing to retry in this batch — every failed file has reached the "
             f"{settings.MAX_FILE_RETRIES}-retry limit, or there are no failures."
         )
+
+    # `RETRY_STARTED`, not completed: this endpoint queues work, it does
+    # not wait for it. The files themselves log their own outcomes as
+    # they run (see `worker/tasks.py`), and `RETRY_COMPLETED` is written
+    # by whichever of them finishes the batch off — claiming completion
+    # here would time the queueing, not the retry.
+    log_event(
+        db,
+        event_type=LogEventType.RETRY_STARTED,
+        status=LogStatus.STARTED,
+        message=f"Re-queued {len(retried)} file(s) in batch '{batch.batch_name}'.",
+        batch_id=batch_id,
+        details={
+            "batch_name": batch.batch_name,
+            "retried_count": len(retried),
+            "retried_file_ids": retried,
+            "executor": executor,
+            "scope": "batch",
+        },
+    )
 
     return RetryResponse(
         batch_id=batch_id,
@@ -451,6 +506,24 @@ def retry_batch_file(batch_id: str, file_id: int, db: Session = Depends(get_db))
             f"{settings.MAX_FILE_RETRIES}-retry limit."
         )
 
+    log_event(
+        db,
+        event_type=LogEventType.RETRY_STARTED,
+        status=LogStatus.STARTED,
+        message=f"Re-queued '{batch_file.original_filename}' in batch {batch_id}.",
+        batch_id=batch_id,
+        filename=batch_file.filename,
+        document_id=batch_file.document_id,
+        document_type=batch_file.document_type,
+        details={
+            "original_filename": batch_file.original_filename,
+            "batch_file_id": file_id,
+            "retry_count": batch_file.retry_count,
+            "executor": executor,
+            "scope": "file",
+        },
+    )
+
     return RetryResponse(
         batch_id=batch_id,
         retried_file_ids=retried,
@@ -481,4 +554,30 @@ def delete_batch(batch_id: str, db: Session = Depends(get_db)) -> None:
     applies in refusing to touch the filesystem.
     """
     batch = _require_batch(db, batch_id)
+
+    # Read before the delete, not after: the row is gone by the time the
+    # next line returns, and a log entry that could only say "a batch was
+    # deleted" without saying which one or how big it was would be the
+    # least useful entry in the table. This is also the *only* remaining
+    # record that the batch existed, since its file rows cascade away
+    # with it — the documents it produced survive, but nothing on them
+    # says which run created them.
+    deleted = {
+        "batch_name": batch.batch_name,
+        "status": batch.status.value,
+        "total_files": batch.total_files,
+        "successful_files": batch.successful_files,
+        "failed_files": batch.failed_files,
+        "executor": batch.executor,
+    }
+
     batch_crud.delete_batch(db, batch)
+
+    log_event(
+        db,
+        event_type=LogEventType.BATCH_DELETED,
+        status=LogStatus.WARNING,
+        message=f"Batch '{deleted['batch_name']}' deleted ({deleted['total_files']} file record(s)).",
+        batch_id=batch_id,
+        details=deleted,
+    )

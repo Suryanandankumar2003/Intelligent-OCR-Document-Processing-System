@@ -17,11 +17,13 @@
  *   /documents                   the persistent, searchable document list
  *   /documents/:filename/review  review one document, standalone
  *   /analytics                   pipeline health dashboard
+ *   /logs                        every recorded event, searchable
+ *   /logs/:logId                 one event in full, with its related records
  *
- * The chrome around all four — sidebar, navbar, theme control — lives in
- * `AppLayout`, which wraps the whole `<Routes>` rather than each screen.
- * That's what keeps the sidebar from remounting (and the mobile drawer
- * from slamming shut) on every navigation.
+ * The chrome around all of them — sidebar, navbar, theme control — lives
+ * in `AppLayout`, which wraps the whole `<Routes>` rather than each
+ * screen. That's what keeps the sidebar from remounting (and the mobile
+ * drawer from slamming shut) on every navigation.
  */
 import { Navigate, Route, Routes, useParams } from 'react-router-dom'
 import AppLayout from './components/layout/AppLayout'
@@ -29,6 +31,8 @@ import AnalyticsPage from './pages/AnalyticsPage'
 import BatchDetailPage from './pages/BatchDetailPage'
 import BatchesPage from './pages/BatchesPage'
 import DocumentsPage from './pages/DocumentsPage'
+import LogDetailPage from './pages/LogDetailPage'
+import LogsPage from './pages/LogsPage'
 import ReviewPage from './pages/ReviewPage'
 import UploadPage from './pages/UploadPage'
 
@@ -62,6 +66,21 @@ function BatchDetailRoute() {
   return <BatchDetailPage key={batchId} />
 }
 
+/**
+ * Mounts the log details screen keyed by the entry it is showing.
+ *
+ * Same reason the other two are keyed: two log URLs are the same route,
+ * so React would keep one mounted across a switch from one entry to
+ * another — and `useLogDetail` holds loading state scoped to a single
+ * id. Reachable from the "related entries" links on the screen itself,
+ * which is exactly the navigation that would otherwise show the
+ * previous entry while the new one loaded.
+ */
+function LogDetailRoute() {
+  const { logId } = useParams()
+  return <LogDetailPage key={logId} />
+}
+
 export default function App() {
   return (
     <AppLayout>
@@ -72,6 +91,8 @@ export default function App() {
         <Route path="/documents" element={<DocumentsPage />} />
         <Route path="/documents/:filename/review" element={<ReviewRoute />} />
         <Route path="/analytics" element={<AnalyticsPage />} />
+        <Route path="/logs" element={<LogsPage />} />
+        <Route path="/logs/:logId" element={<LogDetailRoute />} />
         {/* A mistyped or stale URL lands on the upload screen rather
             than a blank page. `replace` keeps the bad URL out of
             history, so Back doesn't bounce straight back into it. */}

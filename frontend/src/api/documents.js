@@ -224,3 +224,48 @@ export function documentFileUrl(filename) {
   const base = apiClient.defaults.baseURL.replace(/\/$/, '')
   return `${base}/documents/${encodeURIComponent(filename)}/file`
 }
+
+/**
+ * GET /documents/{filename}/file as a blob, for saving to disk.
+ *
+ * Deliberately a fetch-and-save rather than an `<a download>` pointing
+ * at `documentFileUrl`. The `download` attribute is same-origin only: a
+ * browser silently ignores the filename for a cross-origin URL and, in
+ * most cases, navigates to the file instead of downloading it — and this
+ * frontend is served from Vite's port while the API answers on its own,
+ * so every document URL in this app is cross-origin. Pulling the bytes
+ * through Axios and handing them to `saveBlob` is what makes "Download
+ * original document" actually download, under a name the reviewer
+ * recognizes.
+ *
+ * `responseType: 'blob'` for the same reason the xlsx export needs it:
+ * Axios otherwise decodes the body as text, which corrupts a PDF or a
+ * JPEG beyond repair while appearing to succeed.
+ */
+export async function downloadDocumentFile(filename) {
+  const response = await apiClient.get(`/documents/${encodeURIComponent(filename)}/file`, {
+    responseType: 'blob',
+  })
+  return {
+    blob: response.data,
+    filename: filenameFromContentDisposition(response.headers['content-disposition'], filename),
+  }
+}
+
+/**
+ * GET /documents/{filename}/audit — the document's full audit history:
+ * every field a reviewer changed and every decision they recorded,
+ * merged into one list, newest first.
+ *
+ * Its own call rather than more fields on `getDocumentReview`, mirroring
+ * the backend's own split (see backend/api/routes/review.py). The review
+ * payload is what the screen blocks on; this is what a collapsed panel
+ * loads when it is opened, and what gets refetched after a save or a
+ * decision without re-fetching the document.
+ */
+export async function getDocumentAudit(filename, { limit = 100 } = {}) {
+  const response = await apiClient.get(`/documents/${encodeURIComponent(filename)}/audit`, {
+    params: { limit },
+  })
+  return response.data
+}

@@ -1,7 +1,7 @@
 """
 SQLAlchemy ORM models.
 
-Five tables:
+Six tables:
 
 * `documents` — the persistence layer's record of a document as it moves
   through the pipeline: uploaded -> (optionally) classified ->
@@ -22,6 +22,11 @@ Five tables:
   and timing. This is the table that makes "one bad scan doesn't stop
   the other 299" true: a failure is a value in a column here, never an
   exception that propagates anywhere.
+* `application_logs` — the append-only narrative of everything the
+  platform does: uploads, pipeline stages, review decisions, batches,
+  retries, exports and errors. Distinct from `processing_events` above,
+  which is the numeric half of the same story — see `ApplicationLog`'s
+  own docstring for why both exist.
 
 Written in SQLAlchemy 2.0's typed `Mapped`/`mapped_column` style (the
 same declarative-mapping style `database/base.py`'s `Base` is set up
@@ -38,6 +43,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from core.batch_status import BatchFileStatus, BatchStatus
 from core.document_types import DocumentType
+from core.log_events import LogCategory, LogEventType, LogStatus
 from core.processing_event import ProcessingStage, ProcessingStatus
 from core.review_status import ReviewStatus
 from database.base import Base
@@ -544,4 +550,130 @@ class BatchFile(Base):
         return (
             f"BatchFile(id={self.id}, batch_id={self.batch_id!r}, "
             f"filename={self.filename!r}, status={self.processing_status!r})"
+        )
+
+
+class ApplicationLog(Base):
+    """
+    One thing that happened in the platform: an upload accepted, an OCR
+    call started, an extraction that failed, a document approved, a batch
+    finished, an export downloaded.
+
+    --- Why this exists alongside `processing_events` ------------------
+
+    `ProcessingEvent` is a *metric*: three stages, two outcomes, a
+    duration, and nothing else, shaped entirely around the success-rate
+    and timing charts `database/analytics.py` computes. Every column on
+    it is something you can average or group by, and that is deliberate —
+    widening it with a message and a JSON payload would turn the table
+    the dashboard scans on every page load into the table that also
+    absorbs every free-text event in the system.
+
+    This table is the *narrative*: what happened, to which document, in
+    which batch, with what message and what structured detail, whether
+    or not it maps to a pipeline stage at all. An upload rejection, a
+    reviewer's approval, an xlsx export and a batch deletion have no
+    stage and no success rate, and they are exactly the events an
+    operator asking "what happened to this document?" needs to see.
+
+    The two are written from the same call sites and neither replaces
+    the other: `api/processing_metrics.py` records one of each per stage
+    attempt, one for the chart and one for the story.
+
+    --- Not linked by foreign key --------------------------------------
+
+    `document_id` and `batch_id` are plain indexed columns, not
+    `ForeignKey`s — the same choice `ProcessingEvent` makes, for the same
+    reason. A log is a record of something that happened at a moment in
+    time; deleting the document or the batch it happened to must not
+    delete the evidence that it happened, and "the document this refers
+    to has since been deleted" is a perfectly good state for an audit
+    log to be in. `filename` is stored beside the id for the same
+    reason: it stays readable after the row it named is gone.
+
+    --- Append-only ----------------------------------------------------
+
+    Rows are inserted and never updated. A long operation therefore
+    writes *two* rows — `STARTED` and then `SUCCESS`/`FAILURE` — rather
+    than one row that is later mutated. That is what makes an operation
+    which never returned visible at all: a lone `STARTED` with no
+    partner is the signature of a worker that died mid-file, and a
+    schema that updated a single row in place could not represent it.
+    """
+
+    __tablename__ = "application_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+
+    # What happened, and what area of the platform it belongs to — see
+    # `core/log_events.py`, where the mapping between the two is defined
+    # once so a call site names only the event.
+    #
+    # Both are indexed because both are filter dropdowns on the logs
+    # screen, and the analytics breakdown groups on `event_category`.
+    event_type: Mapped[LogEventType] = mapped_column(
+        _enum_column(LogEventType, "log_event_type"), nullable=False, index=True
+    )
+    event_category: Mapped[LogCategory] = mapped_column(
+        _enum_column(LogCategory, "log_category"), nullable=False, index=True
+    )
+
+    # How it turned out. `Started` is a real value here, not a null —
+    # see the class docstring on why an operation writes two rows.
+    status: Mapped[LogStatus] = mapped_column(
+        _enum_column(LogStatus, "log_status"), nullable=False, index=True
+    )
+
+    # What this event was about. All four are nullable because plenty of
+    # events are about neither a document nor a batch (an export, a
+    # startup), and because an upload rejection has a filename but never
+    # got as far as a document row.
+    document_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, index=True)
+    batch_id: Mapped[Optional[str]] = mapped_column(String(32), nullable=True, index=True)
+    filename: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    # Denormalized so "show me every extraction failure on invoices" is a
+    # filter on this table rather than a join to `documents` — which
+    # would also silently drop every row whose document has since been
+    # deleted, the rows an audit log least wants to lose.
+    document_type: Mapped[Optional[DocumentType]] = mapped_column(
+        _enum_column(DocumentType, "log_document_type"), nullable=True, index=True
+    )
+
+    # One sentence, written to be read by a person with no further
+    # context — the same standard `core/exceptions.py` already holds its
+    # messages to, since a failure's message is usually exactly one of
+    # those. `Text`, not `String(n)`: a traceback-derived message has no
+    # useful ceiling and truncating one loses the part that identifies it.
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+
+    # Whatever structured detail the call site had and a human might
+    # later want: the fields a reviewer changed, the filters an export
+    # ran with, the counts a batch finished on. JSON rather than more
+    # columns because every event type would want different ones, and a
+    # table with a column per event's peculiarities is a table nobody can
+    # read.
+    details_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # How long the operation took, in seconds, on the row that records
+    # its completion — `None` on a `STARTED` row (nothing has elapsed
+    # yet) and on the events that are instants rather than operations (a
+    # document approved, a batch deleted).
+    #
+    # Seconds, not the milliseconds `ProcessingEvent.duration_ms` uses:
+    # that column times one Vertex call, where a millisecond is a
+    # meaningful unit; this one times anything from a 40ms database write
+    # to a twenty-minute batch, and a float of seconds reads sensibly
+    # across that whole range.
+    processing_time: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Indexed because every query this table serves is ordered by it, and
+    # the date-range filter and every analytics bucket scope on it.
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"ApplicationLog(id={self.id}, event_type={self.event_type!r}, "
+            f"status={self.status!r}, filename={self.filename!r})"
         )

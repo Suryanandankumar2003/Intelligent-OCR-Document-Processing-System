@@ -48,6 +48,7 @@ from core.exceptions import DocumentPersistenceError
 from core.processing_event import ProcessingStage
 from database import batch_crud
 from database.session import SessionLocal
+from services import batch_events
 from services.document_pipeline import process_document
 from worker.celery_app import BATCH_QUEUE, celery_app
 
@@ -113,7 +114,22 @@ def process_batch_file(self, batch_file_id: int) -> dict:
 
         batch_id = batch_file.batch_id
         filename = batch_file.filename
+        # Read off the claimed row before the pipeline runs, because the
+        # row is re-read and rewritten below and these three are needed
+        # on every exit path — including the ones where the row's own
+        # state has already moved on.
+        original_filename = batch_file.original_filename
+        retry_count = batch_file.retry_count
         batch_crud.mark_batch_started(db, batch_id, executor="celery")
+        batch_events.log_file_started(
+            db,
+            batch_id=batch_id,
+            batch_file_id=batch_file_id,
+            filename=filename,
+            original_filename=original_filename,
+            retry_count=retry_count,
+            executor="celery",
+        )
 
         try:
             result = run_async(
@@ -134,12 +150,21 @@ def process_batch_file(self, batch_file_id: int) -> dict:
             # precisely so this branch can run: record a real message
             # before the hard limit kills the thread with no explanation.
             logger.warning("File %s (%s) exceeded the soft time limit", batch_file_id, filename)
-            batch_crud.mark_file_failed(
-                db,
-                file_id=batch_file_id,
-                error_message="Processing timed out. The document may be very large or the AI service slow.",
+            timeout_message = (
+                "Processing timed out. The document may be very large or the AI service slow."
             )
-            batch_crud.recompute_batch_progress(db, batch_id)
+            batch_crud.mark_file_failed(db, file_id=batch_file_id, error_message=timeout_message)
+            batch_events.log_file_failed(
+                db,
+                batch_id=batch_id,
+                batch_file_id=batch_file_id,
+                filename=filename,
+                original_filename=original_filename,
+                retry_count=retry_count,
+                executor="celery",
+                error_message=timeout_message,
+            )
+            batch_events.log_batch_completed(db, batch_crud.recompute_batch_progress(db, batch_id))
             return {"batch_file_id": batch_file_id, "status": "failed", "reason": "timeout"}
         except DocumentPersistenceError:
             # Let Celery retry this one — it is the database being
@@ -149,9 +174,20 @@ def process_batch_file(self, batch_file_id: int) -> dict:
             raise
         except Exception as exc:  # noqa: BLE001 - a bad document must never kill the worker
             logger.exception("Pipeline failed for file %s (%s)", batch_file_id, filename)
-            batch_crud.mark_file_failed(db, file_id=batch_file_id, error_message=_describe(exc))
-            batch_crud.recompute_batch_progress(db, batch_id)
-            return {"batch_file_id": batch_file_id, "status": "failed", "reason": _describe(exc)}
+            message = _describe(exc)
+            batch_crud.mark_file_failed(db, file_id=batch_file_id, error_message=message)
+            batch_events.log_file_failed(
+                db,
+                batch_id=batch_id,
+                batch_file_id=batch_file_id,
+                filename=filename,
+                original_filename=original_filename,
+                retry_count=retry_count,
+                executor="celery",
+                error_message=message,
+            )
+            batch_events.log_batch_completed(db, batch_crud.recompute_batch_progress(db, batch_id))
+            return {"batch_file_id": batch_file_id, "status": "failed", "reason": message}
 
         batch_crud.mark_file_succeeded(
             db,
@@ -160,7 +196,24 @@ def process_batch_file(self, batch_file_id: int) -> dict:
             document_type=result.document_type,
             processing_time_seconds=result.processing_time_seconds,
         )
-        batch_crud.recompute_batch_progress(db, batch_id)
+        batch_events.log_file_succeeded(
+            db,
+            batch_id=batch_id,
+            batch_file_id=batch_file_id,
+            filename=filename,
+            original_filename=original_filename,
+            retry_count=retry_count,
+            executor="celery",
+            document_id=result.document_id,
+            document_type=result.document_type,
+            extracted=result.is_extracted,
+            processing_time_seconds=result.processing_time_seconds,
+        )
+        # The recompute's return value is what tells us whether this file
+        # was the one that finished the batch off — the only moment
+        # anything in this system learns that, since there is no
+        # batch-level callback by design.
+        batch_events.log_batch_completed(db, batch_crud.recompute_batch_progress(db, batch_id))
 
         return {
             "batch_file_id": batch_file_id,

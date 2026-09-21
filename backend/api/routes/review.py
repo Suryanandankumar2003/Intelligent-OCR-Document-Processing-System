@@ -8,6 +8,7 @@ and what it replaced recorded:
   GET   /documents/{filename}/review           — current state + correction history
   PATCH /documents/{filename}/review           — save corrections
   POST  /documents/{filename}/review/decision  — approve or reject, no data change
+  GET   /documents/{filename}/audit            — the full audit history, newest first
 
 PATCH rather than PUT, and a partial `corrected_fields` body rather than
 a whole document: a review is by nature "these three fields were wrong",
@@ -20,15 +21,33 @@ up, 404/409 if it isn't reviewable, shape the response),
 `services/review_service.py` decides what a correction *means*, and
 `database/crud.py` writes it. None of the three knows how the other two
 work.
+
+--- Why these endpoints write to the application log -------------------
+
+A correction is already audited: `field_corrections` records every value
+that changed, and has since before the Logs module existed. What it
+cannot record is an action that changed no value — which is exactly what
+an approval and a rejection are, and why `save_review_decision`
+deliberately writes no correction rows (inventing audit entries saying a
+field was "corrected" to the value it already had would make the trail
+say something untrue).
+
+That left the two most consequential things a reviewer does invisible to
+any history. The log rows written here are where they live, and
+`services/audit_service.py` is what merges them back together with the
+field changes into the one chronological list the Audit History panel
+shows.
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from core.exceptions import DocumentNotYetExtractedError
+from core.log_events import LogEventType, LogStatus
 from core.review_status import ReviewStatus
-from database import crud
+from database import crud, log_crud
 from database.models import Document, FieldCorrection
 from database.session import get_db
+from schemas.logs import DocumentAuditEntry, DocumentAuditResponse
 from schemas.review import (
     DocumentReviewDecision,
     DocumentReviewResponse,
@@ -36,6 +55,8 @@ from schemas.review import (
     FieldCorrectionRecord,
     ReviewDecision,
 )
+from services.audit_service import CHANGED_FIELDS_KEY, build_audit_history
+from services.event_log import log_event
 from services.review_service import apply_corrections
 
 router = APIRouter(prefix="/documents", tags=["Review"])
@@ -98,6 +119,24 @@ def get_document_review(filename: str, db: Session = Depends(get_db)) -> Documen
     history behind them are still there.
     """
     document = _get_reviewable_document(db, filename)
+
+    # Recorded because "nobody has looked at this" and "somebody looked
+    # at it and left it alone" are different facts about a document
+    # sitting in Pending Review, and nothing else in the system can tell
+    # them apart. Deliberately kept out of the Audit History panel
+    # (`core/log_events.py:REVIEW_ACTION_EVENT_TYPES`): it belongs in the
+    # log, not in a trail of changes, where a row per page load would
+    # bury the actions between them.
+    log_event(
+        db,
+        event_type=LogEventType.REVIEW_OPENED,
+        message=f"Review screen opened for '{filename}'.",
+        filename=filename,
+        document_id=document.id,
+        document_type=document.document_type,
+        details={"review_status": document.review_status.value},
+    )
+
     return _build_review_response(document, crud.list_field_corrections(db, document.id))
 
 
@@ -133,6 +172,35 @@ def update_document_review(
         db, document=document, reviewed_data=reviewed_data, corrections=correction_records
     )
 
+    # Logged *after* the save, never before: a log line saying a review
+    # was saved, written next to a transaction that then failed, is worse
+    # than no line at all. The field names ride along in `details` under
+    # the key `services/audit_service.py` reads them back from, which is
+    # what lets the Audit History panel say "3 fields" on the action row
+    # without re-deriving it from the correction rows beneath it.
+    #
+    # The list can legitimately be empty — every submitted value can
+    # normalize back to what was already stored — and that is recorded
+    # honestly rather than suppressed, because "the reviewer saved and
+    # nothing changed" is a real event.
+    changed = [record["field_name"] for record in correction_records]
+    log_event(
+        db,
+        event_type=LogEventType.REVIEW_SAVED,
+        message=(
+            f"Review saved for '{filename}' with "
+            f"{len(changed)} corrected field{'' if len(changed) == 1 else 's'}."
+        ),
+        filename=filename,
+        document_id=document.id,
+        document_type=document.document_type,
+        details={
+            CHANGED_FIELDS_KEY: changed,
+            "submitted_fields": sorted(payload.corrected_fields),
+            "review_status": document.review_status.value,
+        },
+    )
+
     return _build_review_response(document, crud.list_field_corrections(db, document.id))
 
 
@@ -144,6 +212,14 @@ def update_document_review(
 _STATUS_BY_DECISION = {
     ReviewDecision.APPROVE: ReviewStatus.REVIEWED,
     ReviewDecision.REJECT: ReviewStatus.REJECTED,
+}
+
+# The same shape, for the same reason, one layer along: a third verdict
+# later is one line here rather than a branch in the handler that
+# somebody forgets to extend.
+_EVENT_BY_DECISION = {
+    ReviewDecision.APPROVE: LogEventType.DOCUMENT_APPROVED,
+    ReviewDecision.REJECT: LogEventType.DOCUMENT_REJECTED,
 }
 
 
@@ -188,4 +264,88 @@ def decide_document_review(
     document = crud.save_review_decision(
         db, document=document, review_status=_STATUS_BY_DECISION[payload.decision]
     )
+
+    # The only record a decision leaves anywhere other than the two
+    # columns it wrote. Approve and reject get their own event types
+    # (and therefore their own categories, Approval and Rejection) rather
+    # than one "decision" event carrying the verdict in its payload,
+    # because the Logs screen's category filter and the analytics
+    # breakdown both group on the category — and "show me every
+    # rejection" should be a click, not a payload search.
+    log_event(
+        db,
+        event_type=_EVENT_BY_DECISION[payload.decision],
+        status=LogStatus.SUCCESS if payload.decision is ReviewDecision.APPROVE else LogStatus.WARNING,
+        message=f"Document '{filename}' was {document.review_status.value.lower()}.",
+        filename=filename,
+        document_id=document.id,
+        document_type=document.document_type,
+        details={"decision": payload.decision.value, "review_status": document.review_status.value},
+    )
+
     return _build_review_response(document, crud.list_field_corrections(db, document.id))
+
+
+@router.get(
+    "/{filename}/audit",
+    response_model=DocumentAuditResponse,
+    summary="A document's full audit history — field changes and review actions, newest first",
+)
+def get_document_audit(
+    filename: str,
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+        description="Most recent entries to return. The total is reported separately.",
+    ),
+    db: Session = Depends(get_db),
+) -> DocumentAuditResponse:
+    """
+    Everything that has happened to this document, as one chronological
+    list a reviewer can read top to bottom.
+
+    Deliberately *not* served by `GET .../review`, even though that
+    endpoint already returns `corrections` and the two overlap. Three
+    reasons, in order of how much they matter:
+
+    1. The review response is what the screen blocks on. Adding a second
+       query plus a merge to it would slow the first paint of every
+       review for a panel that starts collapsed and is opened for a
+       minority of documents.
+    2. The audit trail is re-read after every save and every decision,
+       to show what just happened. Folding it into the review response
+       would mean the only way to refresh it is to refetch the whole
+       document.
+    3. `corrections` is oldest-first and anchored to the original
+       extraction, because it is read as the story of how a value got
+       where it is. This is newest-first and interleaved with actions,
+       because it is read to find out what happened last. Serving both
+       orders from one field would mean one of the two consumers sorting
+       the other's list on arrival.
+
+    Unlike the review endpoints, this one does **not** require the
+    document to have been extracted. A document that classified as
+    Unknown has no fields and no corrections, but it can still have been
+    opened, looked at, and rejected — and a 409 here would hide exactly
+    the history explaining why it was.
+    """
+    document = crud.get_document_by_filename(db, filename)
+    if document is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"No document record found for '{filename}'."
+        )
+
+    corrections = crud.list_field_corrections(db, document.id)
+    action_logs = log_crud.list_document_action_logs(db, document_id=document.id, filename=filename)
+
+    entries = build_audit_history(corrections, action_logs, limit=limit)
+
+    return DocumentAuditResponse(
+        filename=filename,
+        # The total before the cap, so a panel showing the most recent
+        # 100 of 340 entries can say so rather than implying there are
+        # only 100.
+        total_entries=len(corrections) + len(action_logs),
+        entries=[DocumentAuditEntry(**entry) for entry in entries],
+    )

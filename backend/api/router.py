@@ -14,6 +14,7 @@ from api.routes import (
     export,
     extraction,
     health,
+    logs,
     ocr,
     review,
     upload,
@@ -29,6 +30,11 @@ api_router.include_router(extraction.router)
 api_router.include_router(review.router)
 api_router.include_router(export.router)
 api_router.include_router(analytics.router)
+# Its own `/logs` prefix, so there is no collision to order around —
+# the specific-before-generic ordering that matters for this router is
+# internal to it (`/logs/analytics` before `/logs/{log_id}`), and is
+# handled where those routes are declared.
+api_router.include_router(logs.router)
 # Registered before `documents.router` for the same reason `export` is:
 # that router owns `/documents/{filename}` and would otherwise shadow a
 # sibling path. Batches live under their own `/batches` prefix, so there

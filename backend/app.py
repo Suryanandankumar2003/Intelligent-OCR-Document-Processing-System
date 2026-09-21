@@ -308,6 +308,48 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(status_code=500, content={"detail": str(exc)})
 
 
+def _log_startup() -> None:
+    """
+    Write one `System Event` row recording that the API came up.
+
+    The reason this is worth a row: a gap in the log is ambiguous.
+    Nothing happening because nobody used the system looks exactly like
+    nothing happening because the system was down, and a startup marker
+    is what separates the two — it turns "no events between 18:00 and
+    09:00" into "no events overnight, and the API was running the whole
+    time" or "the API was restarted at 08:59, which is why the batch
+    that was running at 18:00 has files stuck in Processing".
+
+    Its own session, opened and closed here, because this runs at
+    startup where there is no request and therefore no `get_db`
+    dependency to yield one. Wrapped in a blanket `except` on top of the
+    best-effort write underneath it: a logging failure must not stop the
+    application from starting, which is the one thing that would make
+    this observability feature strictly worse than not having it.
+    """
+    from core.log_events import LogEventType
+    from database.session import SessionLocal
+    from services.event_log import log_event
+
+    db = SessionLocal()
+    try:
+        log_event(
+            db,
+            event_type=LogEventType.SYSTEM_EVENT,
+            message=f"{settings.APP_NAME} {settings.APP_VERSION} started.",
+            details={
+                "environment": settings.ENVIRONMENT,
+                "debug": settings.DEBUG,
+                "upload_dir": str(settings.UPLOAD_DIR),
+                "batch_inline_fallback": settings.BATCH_INLINE_FALLBACK,
+            },
+        )
+    except Exception:  # noqa: BLE001 - a log row is never a reason to fail startup
+        logger.exception("Could not record the startup event")
+    finally:
+        db.close()
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title=settings.APP_NAME,
@@ -341,6 +383,7 @@ def create_app() -> FastAPI:
     def on_startup() -> None:
         settings.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
         init_db()
+        _log_startup()
 
     @app.on_event("shutdown")
     def on_shutdown() -> None:

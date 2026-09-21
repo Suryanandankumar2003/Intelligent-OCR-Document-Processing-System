@@ -38,6 +38,12 @@
  * stays one click away because it is searchable and copyable in a way an
  * image is not.
  *
+ * The document view is `DocumentViewer`, which renders PDFs itself
+ * rather than handing them to the browser — that is what makes zoom,
+ * fit-to-width, page navigation and highlighting of the extracted
+ * values available to this screen at all. See that component for the
+ * trade it makes.
+ *
  * Tabs rather than a third column: at three panes none of them is wide
  * enough to read, and the two source views are alternatives — a
  * reviewer is looking at one or the other, never both at once.
@@ -65,8 +71,8 @@ import {
   Typography,
 } from '@mui/material'
 import ArrowBackIcon from '@mui/icons-material/ArrowBack'
-import CorrectionHistory from '../components/CorrectionHistory'
-import DocumentPreview from '../components/DocumentPreview'
+import AuditHistory from '../components/AuditHistory'
+import DocumentViewer from '../components/DocumentViewer'
 import DocumentReviewForm from '../components/DocumentReviewForm'
 import DocumentTypeBadge from '../components/DocumentTypeBadge'
 import ErrorBanner from '../components/ErrorBanner'
@@ -89,7 +95,7 @@ import { MONO_FAMILY } from '../theme/theme'
  * later (a flash of empty inputs). Mounting this only once the data is
  * there sidesteps both.
  */
-function ReviewEditor({ review, isSaving, pendingDecision, onSave, onDecide, backTo }) {
+function ReviewEditor({ review, filename, isSaving, pendingDecision, onSave, onDecide, backTo }) {
   const { fields, editedFields, setFieldText, discard, changedFields } = useReviewDraft(
     review.original_data,
     review.reviewed_data,
@@ -151,7 +157,11 @@ function ReviewEditor({ review, isSaving, pendingDecision, onSave, onDecide, bac
           <DocumentReviewForm fields={fields} onFieldChange={setFieldText} disabled={isBusy} />
 
           <Box sx={{ mt: 3 }}>
-            <CorrectionHistory corrections={review.corrections} />
+            {/* `review` as the refresh token: `useDocumentReview`
+                replaces that object on every save and every decision, so
+                the panel reloads exactly when the history it shows has
+                actually changed — and never on an unrelated re-render. */}
+            <AuditHistory filename={filename} refreshToken={review} />
           </Box>
         </CardContent>
       </Card>
@@ -325,7 +335,16 @@ export default function ReviewPage() {
                   flex: 1,
                 }}
               >
-                <DocumentPreview filename={filename} fill minHeight={280} />
+                {/* The current field values, not the originals: a
+                    reviewer correcting a misread value wants to find
+                    what they just typed on the page, which is how they
+                    check they typed it right. */}
+                <DocumentViewer
+                  filename={filename}
+                  fields={review.reviewed_data}
+                  fill
+                  minHeight={320}
+                />
               </Box>
 
               <Box
@@ -363,6 +382,7 @@ export default function ReviewPage() {
 
           <ReviewEditor
             review={review}
+            filename={filename}
             isSaving={isSaving}
             pendingDecision={pendingDecision}
             onSave={save}

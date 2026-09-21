@@ -48,6 +48,7 @@ from core.async_runner import run_async
 from core.config import get_settings
 from database import batch_crud
 from database.session import SessionLocal
+from services import batch_events
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -114,7 +115,21 @@ def _process_file_inline(batch_file_id: int) -> None:
 
         batch_id = batch_file.batch_id
         filename = batch_file.filename
+        # Read off the claimed row up front: the row is rewritten below
+        # and these two are needed on every exit path. Same reason
+        # `worker/tasks.py` reads them at the same point.
+        original_filename = batch_file.original_filename
+        retry_count = batch_file.retry_count
         batch_crud.mark_batch_started(db, batch_id, executor=EXECUTOR_INLINE)
+        batch_events.log_file_started(
+            db,
+            batch_id=batch_id,
+            batch_file_id=batch_file_id,
+            filename=filename,
+            original_filename=original_filename,
+            retry_count=retry_count,
+            executor=EXECUTOR_INLINE,
+        )
 
         try:
             result = run_async(
@@ -131,8 +146,19 @@ def _process_file_inline(batch_file_id: int) -> None:
             message = str(exc).strip() or type(exc).__name__
             if not type(exc).__module__.startswith("core.exceptions"):
                 message = f"{type(exc).__name__}: {message}"
-            batch_crud.mark_file_failed(db, file_id=batch_file_id, error_message=message[:2000])
-            batch_crud.recompute_batch_progress(db, batch_id)
+            message = message[:2000]
+            batch_crud.mark_file_failed(db, file_id=batch_file_id, error_message=message)
+            batch_events.log_file_failed(
+                db,
+                batch_id=batch_id,
+                batch_file_id=batch_file_id,
+                filename=filename,
+                original_filename=original_filename,
+                retry_count=retry_count,
+                executor=EXECUTOR_INLINE,
+                error_message=message,
+            )
+            batch_events.log_batch_completed(db, batch_crud.recompute_batch_progress(db, batch_id))
             return
 
         batch_crud.mark_file_succeeded(
@@ -142,7 +168,20 @@ def _process_file_inline(batch_file_id: int) -> None:
             document_type=result.document_type,
             processing_time_seconds=result.processing_time_seconds,
         )
-        batch_crud.recompute_batch_progress(db, batch_id)
+        batch_events.log_file_succeeded(
+            db,
+            batch_id=batch_id,
+            batch_file_id=batch_file_id,
+            filename=filename,
+            original_filename=original_filename,
+            retry_count=retry_count,
+            executor=EXECUTOR_INLINE,
+            document_id=result.document_id,
+            document_type=result.document_type,
+            extracted=result.is_extracted,
+            processing_time_seconds=result.processing_time_seconds,
+        )
+        batch_events.log_batch_completed(db, batch_crud.recompute_batch_progress(db, batch_id))
     except Exception:  # noqa: BLE001 - last line of defence; see the docstring
         logger.exception("Unhandled error in inline batch worker for file %s", batch_file_id)
     finally:
